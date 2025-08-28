@@ -1,13 +1,12 @@
 import json
+import logging
 import os
 import random
 import time
-import logging
 
-from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.executors.pool import ThreadPoolExecutor
+from apscheduler.schedulers.background import BackgroundScheduler
 
-import logger_config
 from config import config
 from data.fetcher import StockDataFetcher
 from data.storage import Storage
@@ -60,21 +59,48 @@ class TaskScheduler:
         log.info(f"Scheduled daily data fetching for {len(stock_symbols)} stocks.")
 
     def schedule_backfill_tasks(self):
-        """Schedules a one-time job for each stock to fetch its entire history."""
+        """Schedules a single, one-time job to run the entire backfill process."""
         stock_symbols = self._get_stock_symbols()
         if not stock_symbols:
             return 0
 
-        for symbol in stock_symbols:
-            
-            self.scheduler.add_job(
-                self.fetch_and_store_full_history,
-                args=[symbol],
-                id=f"backfill_{symbol}",
-                replace_existing=True  
-            )
-        log.info(f"Scheduled backfill tasks for {len(stock_symbols)} stocks.")
+        # Schedule a single job that will iterate through all stocks.
+        # This avoids overwhelming the scheduler with thousands of queued jobs.
+        self.scheduler.add_job(
+            self._run_full_backfill_loop,
+            args=[stock_symbols],
+            id="master_backfill_job",
+            replace_existing=True
+        )
+        log.info(f"Scheduled a single backfill job for {len(stock_symbols)} stocks.")
         return len(stock_symbols)
+
+    def _run_full_backfill_loop(self, stock_symbols: list[str]):
+        """
+        The actual backfill process, run as a single long-running job.
+        It iterates through all symbols and fetches their history, but only for
+        symbols that are not already in the database.
+        """
+        total_symbols = len(stock_symbols)
+        new_symbols_processed = 0
+        log.info(f"Starting master backfill job for {total_symbols} symbols.")
+        for i, symbol in enumerate(stock_symbols):
+            # Log progress periodically to show the job is still running.
+            if (i + 1) % 100 == 0:
+                log.info(f"Backfill progress: {i + 1}/{total_symbols} symbols checked.")
+
+            # QA Query: Check if the stock already exists in the database.
+            # This prevents re-fetching the entire history for existing stocks.
+            if self.storage.symbol_exists(symbol):
+                log.debug(f"Skipping backfill for {symbol}; data already exists.")
+                continue
+
+            # If the symbol is new, fetch its full history.
+            log.info(f"New symbol found: {symbol}. Starting full history backfill.")
+            self._fetch_and_store(symbol, period="max", job_type="backfill")
+            new_symbols_processed += 1
+        
+        log.info(f"Master backfill job completed. Checked {total_symbols} symbols, processed {new_symbols_processed} new symbols.")
 
     def _fetch_and_store(self, symbol: str, period: str, job_type: str):
         """Private helper to fetch, store, and log stock data."""
@@ -98,12 +124,6 @@ class TaskScheduler:
         The job function that fetches recent data for a single symbol and stores it.
         """
         self._fetch_and_store(symbol, period="5d", job_type="daily")
-
-    def fetch_and_store_full_history(self, symbol: str):
-        """
-        The job function that fetches the entire history for a single symbol and stores it.
-        """
-        self._fetch_and_store(symbol, period="max", job_type="backfill")
 
     def start(self):
         """Starts the scheduler if it is not already running."""

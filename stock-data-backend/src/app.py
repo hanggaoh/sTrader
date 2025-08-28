@@ -20,7 +20,7 @@ atexit.register(lambda: scheduler.stop())
 def index():
     return "Stock data scheduler is running."
 
-@app.route('/trigger-backfill', methods=['POST'])
+@app.route('/trigger-backfill', methods=['PUT'])
 def trigger_backfill():
     """
     Triggers a one-time background task to fetch and store the full

@@ -122,6 +122,26 @@ class Storage:
                         volume = EXCLUDED.volume;
                 """)
 
+    def symbol_exists(self, stock_symbol: str) -> bool:
+        """
+        Checks if any data for a given stock symbol already exists in the database.
+        This is an efficient query to avoid fetching data for stocks that have
+        already been backfilled.
+
+        Args:
+            stock_symbol (str): The stock ticker symbol to check.
+
+        Returns:
+            bool: True if data for the symbol exists, False otherwise.
+        """
+        query = "SELECT 1 FROM stock_data WHERE stock_symbol = %s LIMIT 1;"
+        with self.pool.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(query, (stock_symbol,))
+                # fetchone() returns a tuple if a row is found, otherwise None.
+                # We convert this to a boolean.
+                return cursor.fetchone() is not None
+
     def read_historical_data(self, stock_symbol: str) -> pd.DataFrame:
         """
         Reads historical data for a given stock symbol from the database.
