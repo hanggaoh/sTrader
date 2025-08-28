@@ -1,15 +1,17 @@
-version: '3.1'
+version: '3.8'
 
 services:
   db:
-    image: mysql:latest
-    container_name: mysql-container
+    image: timescale/timescaledb:latest-pg16
+    container_name: timescaledb
     environment:
-      MYSQL_ROOT_PASSWORD: my-secret-pw
+      POSTGRES_USER: strader_user
+      POSTGRES_PASSWORD: my-secret-pw
+      POSTGRES_DB: strader_db
     volumes:
-      - mysql-data:/var/lib/mysql
+      - timescaledb-data:/var/lib/postgresql/data
     ports:
-      - "3306:3306"
+      - "5432:5432"
 
 volumes:
-  mysql-data:
+  timescaledb-data:

@@ -1,11 +1,5 @@
 #%%
 
-# !pip install pymysql
-# !pip install cryptography
-# !pip install python-dotenv
-
-#%%
-
 import pymysql
 from dotenv import load_dotenv
 import os

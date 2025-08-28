@@ -1,0 +1,10 @@
+psycopg[binary]
+cryptography
+python-dotenv
+yfinance
+apscheduler
+pandas
+numpy
+pytest
+pytest-mock
+akshare
