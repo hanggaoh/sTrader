@@ -46,17 +46,18 @@ class TaskScheduler:
             log.warning("No symbols found, skipping daily task scheduling.")
             return
 
-        for symbol in stock_symbols:
-            self.scheduler.add_job(
-                self.fetch_and_store_data,
-                'cron',
-                hour=4,
-                minute=0,
-                args=[symbol],
-                id=f"fetch_{symbol}",
-                replace_existing=True
-            )
-        log.info(f"Scheduled daily data fetching for {len(stock_symbols)} stocks.")
+        # Schedule a single master job to run daily.
+        # This avoids overwhelming the scheduler with thousands of individual cron jobs.
+        self.scheduler.add_job(
+            self._run_daily_fetch_loop,
+            'cron',
+            hour=4,
+            minute=0,
+            args=[stock_symbols],
+            id="master_daily_job",
+            replace_existing=True
+        )
+        log.info(f"Scheduled a single daily job for {len(stock_symbols)} stocks.")
 
     def schedule_backfill_tasks(self):
         """Schedules a single, one-time job to run the entire backfill process."""
@@ -102,6 +103,22 @@ class TaskScheduler:
         
         log.info(f"Master backfill job completed. Checked {total_symbols} symbols, processed {new_symbols_processed} new symbols.")
 
+    def _run_daily_fetch_loop(self, stock_symbols: list[str]):
+        """
+        The actual daily fetch process, run as a single long-running job.
+        It iterates through all symbols and fetches their recent history.
+        """
+        total_symbols = len(stock_symbols)
+        log.info(f"Starting master daily fetch job for {total_symbols} symbols.")
+        for i, symbol in enumerate(stock_symbols):
+            # Log progress periodically to show the job is still running.
+            if (i + 1) % 100 == 0:
+                log.info(f"Daily fetch progress: {i + 1}/{total_symbols} symbols processed.")
+            
+            self._fetch_and_store(symbol, period="5d", job_type="daily")
+        
+        log.info(f"Master daily fetch job completed for all {total_symbols} symbols.")
+
     def _fetch_and_store(self, symbol: str, period: str, job_type: str):
         """Private helper to fetch, store, and log stock data."""
         log.info(f"Running {job_type} job for symbol: {symbol}")
@@ -118,12 +135,6 @@ class TaskScheduler:
         finally:
             # Add a small, randomized delay to be polite to the API provider.
             time.sleep(random.uniform(0.5, 1.5))
-
-    def fetch_and_store_data(self, symbol: str):
-        """
-        The job function that fetches recent data for a single symbol and stores it.
-        """
-        self._fetch_and_store(symbol, period="5d", job_type="daily")
 
     def start(self):
         """Starts the scheduler if it is not already running."""
