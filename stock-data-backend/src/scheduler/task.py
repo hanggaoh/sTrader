@@ -16,9 +16,11 @@ log = logging.getLogger(__name__)
 class TaskScheduler:
     def __init__(self):
         executors = {
-            # Limit the number of concurrent jobs to avoid overwhelming the API.
-            # A lower number is safer.
-            'default': ThreadPoolExecutor(max_workers=2)
+            # Keep the default pool for regular, time-sensitive jobs like the daily fetch.
+            'default': ThreadPoolExecutor(max_workers=2),
+            # Add a dedicated executor for long-running, low-priority backfill tasks.
+            # This prevents backfills from blocking the daily jobs.
+            'backfill_executor': ThreadPoolExecutor(max_workers=1)
         }
 
         job_defaults = {
@@ -71,7 +73,8 @@ class TaskScheduler:
             self._run_full_backfill_loop,
             args=[stock_symbols],
             id="master_backfill_job",
-            replace_existing=True
+            replace_existing=True,
+            executor='backfill_executor'  # Assign this job to the dedicated executor
         )
         log.info(f"Scheduled a single backfill job for {len(stock_symbols)} stocks.")
         return len(stock_symbols)
