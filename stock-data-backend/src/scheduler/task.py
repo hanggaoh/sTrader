@@ -55,11 +55,30 @@ class TaskScheduler:
             'cron',
             hour=4,
             minute=0,
-            args=[stock_symbols],
+            # Pass a robust number of days (e.g., 5) for the scheduled cron job.
+            # This ensures it can catch up even after long weekends or holidays.
+            args=[stock_symbols, 5],
             id="master_daily_job",
             replace_existing=True
         )
         log.info(f"Scheduled a single daily job for {len(stock_symbols)} stocks.")
+
+    def run_daily_fetch_now(self, days=5):
+        """
+        Schedules a one-time, immediate job to fetch the latest daily data.
+        This is useful for running on application startup to ensure data is
+        fresh without waiting for the scheduled cron time.
+        """
+        stock_symbols = self._get_stock_symbols()
+        if not stock_symbols:
+            log.warning("No symbols found, skipping immediate daily fetch.")
+            return 0
+
+        log.info("Scheduling an immediate one-time run of the daily fetch job.")
+        self.scheduler.add_job(
+            self._run_daily_fetch_loop, args=[stock_symbols, days], id="immediate_daily_fetch", replace_existing=True
+        )
+        return len(stock_symbols)
 
     def schedule_backfill_tasks(self):
         """Schedules a single, one-time job to run the entire backfill process."""
@@ -106,19 +125,24 @@ class TaskScheduler:
         
         log.info(f"Master backfill job completed. Checked {total_symbols} symbols, processed {new_symbols_processed} new symbols.")
 
-    def _run_daily_fetch_loop(self, stock_symbols: list[str]):
+    def _run_daily_fetch_loop(self, stock_symbols: list[str], days: int):
         """
         The actual daily fetch process, run as a single long-running job.
         It iterates through all symbols and fetches their recent history.
+
+        Args:
+            stock_symbols (list[str]): List of stock symbols to process.
+            days (int): The number of recent days to fetch.
         """
+        period_str = f"{days}d"
         total_symbols = len(stock_symbols)
-        log.info(f"Starting master daily fetch job for {total_symbols} symbols.")
+        log.info(f"Starting master daily fetch job for {total_symbols} symbols, fetching last {period_str}.")
         for i, symbol in enumerate(stock_symbols):
             # Log progress periodically to show the job is still running.
             if (i + 1) % 100 == 0:
                 log.info(f"Daily fetch progress: {i + 1}/{total_symbols} symbols processed.")
             
-            self._fetch_and_store(symbol, period="5d", job_type="daily")
+            self._fetch_and_store(symbol, period=period_str, job_type="daily")
         
         log.info(f"Master daily fetch job completed for all {total_symbols} symbols.")
 

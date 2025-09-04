@@ -80,9 +80,12 @@ class Storage:
 
         # Prepare data for bulk copy. This is significantly faster than row-by-row inserts.
         data_to_copy = data.copy()
+        # Sanitize column names to lowercase to match the database schema.
+        # This makes the storage layer robust to the capitalization of input data.
+        data_to_copy.columns = [c.lower() for c in data_to_copy.columns]
         data_to_copy['stock_symbol'] = stock_symbol
         # Ensure column order matches the temporary table for COPY
-        data_to_copy = data_to_copy[['stock_symbol', 'Open', 'High', 'Low', 'Close', 'Volume']]
+        data_to_copy = data_to_copy[['stock_symbol', 'open', 'high', 'low', 'close', 'volume']]
 
         # Use an in-memory buffer to stage the data as a CSV
         buffer = io.StringIO()

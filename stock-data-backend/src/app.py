@@ -1,4 +1,4 @@
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from scheduler.task import TaskScheduler
 import os
 import atexit
@@ -30,6 +30,32 @@ def trigger_backfill():
     count = scheduler.schedule_backfill_tasks()
     return jsonify({
         "message": f"Successfully scheduled backfill for {count} stocks. Check logs for progress."
+    }), 202
+
+@app.route('/trigger-daily-fetch', methods=['PUT'])
+def trigger_daily_fetch():
+    """
+    Triggers a one-time background task to fetch and store recent
+    historical data for all stocks.
+    Accepts an optional 'days' parameter in the JSON body.
+    """
+    log.info("Daily fetch endpoint triggered.")
+    
+    # Get 'days' from request body, default to 5 if not provided or invalid
+    days = 5
+    if request.is_json:
+        days = request.get_json().get('days', 5)
+    
+    try:
+        days = int(days)
+        if days <= 0:
+            days = 5 # Reset to default if non-positive
+    except (ValueError, TypeError):
+        days = 5 # Reset to default if not a valid integer
+
+    count = scheduler.run_daily_fetch_now(days=days)
+    return jsonify({
+        "message": f"Successfully scheduled daily fetch for {count} stocks, fetching the last {days} days. Check logs for progress."
     }), 202
 
 if __name__ == "__main__":
