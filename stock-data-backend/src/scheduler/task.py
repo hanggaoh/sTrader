@@ -16,11 +16,15 @@ log = logging.getLogger(__name__)
 class TaskScheduler:
     def __init__(self):
         executors = {
-            # Keep the default pool for regular, time-sensitive jobs like the daily fetch.
+            # A dedicated executor for the time-sensitive daily cron job to ensure it's never blocked.
+            'cron_executor': ThreadPoolExecutor(max_workers=1),
+            # The default pool for on-demand API requests.
             'default': ThreadPoolExecutor(max_workers=2),
-            # Add a dedicated executor for long-running, low-priority backfill tasks.
+            # A dedicated executor for the very long-running backfill task.
             # This prevents backfills from blocking the daily jobs.
-            'backfill_executor': ThreadPoolExecutor(max_workers=1)
+            'backfill_executor': ThreadPoolExecutor(max_workers=1),
+            # A dedicated, single-threaded executor for repair jobs to prevent rate-limiting.
+            'repair_executor': ThreadPoolExecutor(max_workers=1)
         }
 
         job_defaults = {
@@ -37,10 +41,16 @@ class TaskScheduler:
         json_path = os.path.join(os.path.dirname(__file__), '../data/chinese_stocks.json')
         try:
             with open(json_path, 'r') as f:
-                return json.load(f)
+                symbols = json.load(f)
+                if not isinstance(symbols, list):
+                    log.error(f"Stock symbols file at {json_path} is not a valid JSON list.")
+                    return []
+                return symbols
         except FileNotFoundError:
             log.error(f"Stock symbols file not found at {json_path}")
-            return []
+        except json.JSONDecodeError:
+            log.error(f"Could not decode JSON from stock symbols file at {json_path}. Is it formatted correctly?")
+        return []
 
     def schedule_daily_tasks(self):
         stock_symbols = self._get_stock_symbols()
@@ -59,7 +69,8 @@ class TaskScheduler:
             # This ensures it can catch up even after long weekends or holidays.
             args=[stock_symbols, 5],
             id="master_daily_job",
-            replace_existing=True
+            replace_existing=True,
+            executor='cron_executor'  # Assign this job to its dedicated executor
         )
         log.info(f"Scheduled a single daily job for {len(stock_symbols)} stocks.")
 
@@ -79,6 +90,27 @@ class TaskScheduler:
             self._run_daily_fetch_loop, args=[stock_symbols, days], id="immediate_daily_fetch", replace_existing=True
         )
         return len(stock_symbols)
+
+    def fetch_single_stock_now(self, symbol: str, days: int = 5):
+        """
+        Schedules a one-time, immediate job to fetch the latest daily data
+        for a single stock symbol.
+
+        Args:
+            symbol (str): The stock symbol to fetch.
+            days (int): The number of recent days to fetch data for.
+        """
+        log.info(f"Scheduling an immediate one-time fetch for {symbol} for the last {days} days.")
+        period_str = f"{days}d"
+        # Use a unique job ID to allow multiple single-stock fetches to be scheduled.
+        job_id = f"fetch_single_{symbol}_{int(time.time())}"
+        self.scheduler.add_job(
+            self._fetch_and_store,
+            args=[symbol, period_str, "single-fetch"],
+            id=job_id,
+            replace_existing=False,  # Allow multiple ad-hoc fetches
+            executor='repair_executor'  # Assign to the single-threaded executor
+        )
 
     def schedule_backfill_tasks(self):
         """Schedules a single, one-time job to run the entire backfill process."""
@@ -149,19 +181,35 @@ class TaskScheduler:
     def _fetch_and_store(self, symbol: str, period: str, job_type: str):
         """Private helper to fetch, store, and log stock data."""
         log.info(f"Running {job_type} job for symbol: {symbol}")
-        try:
-            data = self.fetcher.fetch_historical_data(symbol, period=period)
-            if not data.empty:
-                self.storage.store_historical_data(symbol, data)
-                log.info(f"Successfully stored {len(data)} records for {symbol} ({job_type}).")
-            else:
-                log.warning(f"No data fetched for {symbol} ({job_type}). It might be a holiday or an invalid symbol.")
-        except Exception as e:
-            # exc_info=True will log the full stack trace for better debugging
-            log.error(f"An error occurred during {job_type} for {symbol}: {e}", exc_info=True)
-        finally:
-            # Add a small, randomized delay to be polite to the API provider.
-            time.sleep(random.uniform(0.5, 1.5))
+
+        max_retries = 3
+        backoff_factor = 5  # Start with a 5-second delay
+
+        for attempt in range(max_retries):
+            try:
+                data = self.fetcher.fetch_historical_data(symbol, period=period)
+                if not data.empty:
+                    self.storage.store_historical_data(symbol, data)
+                    log.info(f"Successfully stored {len(data)} records for {symbol} ({job_type}).")
+                else:
+                    log.warning(f"No data fetched for {symbol} ({job_type}). It might be a holiday or an invalid symbol.")
+
+                # Success, so we add the politeness delay and exit the function.
+                time.sleep(random.uniform(2.0, 3.5))
+                return  # Exit successfully
+
+            except Exception as e:
+                log.warning(f"Attempt {attempt + 1}/{max_retries} failed for {symbol} with error: {e}")
+                if attempt + 1 < max_retries:
+                    # Exponential backoff: wait 5s, then 10s, etc.
+                    sleep_time = backoff_factor * (attempt + 1)
+                    log.info(f"Will retry fetching {symbol} in {sleep_time} seconds...")
+                    time.sleep(sleep_time)
+                else:
+                    log.error(f"All {max_retries} retries failed for {symbol}. Giving up.", exc_info=True)
+
+        # This part is reached only if all retries fail. We still add the politeness delay.
+        time.sleep(random.uniform(2.0, 3.5))
 
     def start(self):
         """Starts the scheduler if it is not already running."""

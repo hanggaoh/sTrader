@@ -2,6 +2,9 @@ import argparse
 import os
 import sys
 
+import time
+import requests
+import json
 import pandas as pd
 
 # Add the project's 'src' directory to the Python path to allow for module imports
@@ -45,39 +48,62 @@ def query_stock_summary(storage: Storage):
     print(f"\nFound data for a total of {len(df)} unique stock symbols.")
 
 
-def check_missing_data_per_stock(storage: Storage, days_to_check: int, reference_symbol: str):
+
+def trigger_single_stock_fix(symbol: str, days_to_fetch: int) -> bool:
+    api_url = "http://127.0.0.1:5000/trigger-fetch-single"  # use 127.0.0.1
+    payload = {"symbol": symbol, "days": days_to_fetch}
+
+    print(f"  Triggering API to fetch last {days_to_fetch} days...")
+    try:
+        # disable env proxies so call goes to localhost
+        resp = requests.put(
+            api_url,
+            json=payload,
+            timeout=10,
+            headers={"Accept": "application/json"},
+            proxies={"http": None, "https": None},
+        )
+        if resp.status_code == 202:
+            print(f"  -> Successfully scheduled fix for {symbol}.")
+            return True
+        else:
+            print(f"  -> ERROR: {resp.status_code} {resp.text}")
+            return False
+    except requests.exceptions.RequestException as e:
+        print(f"  -> ERROR: Could not connect to {api_url}: {e}")
+        print(f"  -> To test manually: curl --noproxy '*' -X PUT -H 'Content-Type: application/json' "
+              f"-d '{json.dumps(payload)}' {api_url}")
+        return False
+
+def check_missing_data_per_stock(storage: Storage, days_to_check: int, auto_fix: bool):
     """
     Checks for missing trading dates for all stocks over a recent period.
 
-    It uses a reliable reference symbol to determine the actual trading days
-    and then compares each stock's data against that calendar.
+    It works by generating a calendar of all recent weekdays (Mon-Fri) and
+    then checking each stock against that calendar to find missing data points.
+    Note: This may flag market holidays as "missing" days.
 
     Args:
         storage (Storage): An active storage instance for database access.
         days_to_check (int): The number of recent calendar days to check.
-        reference_symbol (str): A liquid stock symbol to use as a market calendar.
+        auto_fix (bool): If True, automatically trigger API calls to fix missing data.
     """
     print(f"\nChecking for missing data in the last {days_to_check} days...")
-    print(f"Using '{reference_symbol}' as the reference for trading days.")
+    print("Generating a calendar of expected weekdays (Mon-Fri) to check against.")
+
+    # 1. Generate a set of all weekdays for the period to check.
+    import datetime
+    today = datetime.date.today()
+    expected_dates = set()
+    for i in range(days_to_check):
+        d = today - datetime.timedelta(days=i)
+        if d.weekday() < 5:  # Monday is 0, Friday is 4
+            expected_dates.add(d)
+
+    print(f"Expected weekdays to check: {sorted(list(expected_dates))}")
+
     with storage.pool.connection() as conn:
-        # 1. Get the actual trading dates from the reference symbol
-        ref_query = """
-            SELECT DISTINCT(time::date) AS trade_date
-            FROM stock_data
-            WHERE stock_symbol = %s AND time >= NOW() - (%s * INTERVAL '1 day')
-            ORDER BY trade_date;
-        """
-        ref_df = pd.read_sql(ref_query, conn, params=(reference_symbol, days_to_check))
-        if ref_df.empty:
-            print(f"\n[ERROR] Could not find any data for reference symbol '{reference_symbol}' in the last {days_to_check} days.")
-            print("This usually means the database has not been populated with sufficient historical data.")
-            print("\nSuggestion: Run a full data backfill using the API endpoint before running this check.")
-            return
-
-        expected_dates = set(ref_df['trade_date'])
-        print(f"Expected trading dates: {sorted(list(expected_dates))}")
-
-        # 2. Get all unique symbols in the database
+        # 2. Get all unique symbols that exist in the database
         all_symbols_df = pd.read_sql("SELECT DISTINCT(stock_symbol) FROM stock_data;", conn)
         all_symbols = all_symbols_df['stock_symbol'].tolist()
 
@@ -99,15 +125,44 @@ def check_missing_data_per_stock(storage: Storage, days_to_check: int, reference
             if missing_dates:
                 missing_data_report[symbol] = missing_dates
 
-    # 4. Print the final report
     if not missing_data_report:
         print("\n--- No missing recent dates found. Data is complete! ---")
     else:
-        print("\n--- Missing Data Found ---")
+        if auto_fix:
+            print("\n--- Missing Data Found: Automatically Triggering Fixes ---")
+        else:
+            print("\n--- Missing Data Found (Dry Run) ---")
+        import datetime
+        today = datetime.date.today()
+        successful_triggers = 0
+        failed_triggers = []
+
         for symbol, dates in missing_data_report.items():
-            print(f"Symbol {symbol} is missing dates: {[d.strftime('%Y-%m-%d') for d in dates]}")
-        print("--------------------------")
-        print(f"Found missing data for {len(missing_data_report)} symbols.")
+            oldest_missing = min(dates)
+            # Calculate days from today to the oldest missing date, add a buffer
+            days_to_fetch = (today - oldest_missing).days + 2
+
+            print(f"\n- Found missing dates for {symbol}: {[d.strftime('%Y-%m-%d') for d in dates]}")
+
+            if auto_fix:
+                if trigger_single_stock_fix(symbol, days_to_fetch):
+                    successful_triggers += 1
+                else:
+                    failed_triggers.append(symbol)
+                
+                # Add a delay between API calls to be polite to the backend scheduler and avoid
+                # triggering rate limits on the underlying data provider (yfinance).
+                time.sleep(1)
+            else:
+                api_url = "http://localhost:5000/trigger-fetch-single"
+                payload = {"symbol": symbol, "days": days_to_fetch}
+                print(f"  -> To fix, run: curl -X PUT -H 'Content-Type: application/json' -d '{json.dumps(payload)}' {api_url}")
+
+        if auto_fix:
+            print("\n--- Fix Attempt Summary ---")
+            print(f"Successfully triggered fixes for {successful_triggers} of {len(missing_data_report)} missing stocks.")
+            if failed_triggers:
+                print(f"Failed to trigger fixes for {len(failed_triggers)} stocks: {failed_triggers}")
 
 
 def check_missing_market_days(storage: Storage, days_to_check: int):
@@ -171,7 +226,7 @@ def main():
     parser.add_argument(
         "--check-per-stock",
         action="store_true",
-        help="Check for missing trading dates on a per-stock basis (requires a reliable --ref-symbol)."
+        help="Check for missing weekday data on a per-stock basis."
     )
     parser.add_argument(
         "--check-market-days",
@@ -179,16 +234,25 @@ def main():
         help="Check for entire weekdays missing from the database (e.g., failed cron job)."
     )
     parser.add_argument(
+        "--test-fix-api",
+        action="store_true",
+        help="Test the single-stock fix API endpoint with a specific symbol and number of days."
+    )
+    parser.add_argument(
+        "--symbol",
+        type=str,
+        help="The stock symbol to use with --test-fix-api."
+    )
+    parser.add_argument(
         "--days",
         type=int,
         default=10,
-        help="How many days back to check for missing data. (Default: 10)"
+        help="Number of days to use for checks or for the test-fix API call. (Default: 10)"
     )
     parser.add_argument(
-        "--ref-symbol",
-        type=str,
-        default="689009.SS",
-        help="Reference symbol for market calendar. (Default: 689009.SS)"
+        "--no-fix",
+        action="store_true",
+        help="Run checks without automatically triggering fixes (dry run)."
     )
     args = parser.parse_args()
 
@@ -197,15 +261,20 @@ def main():
         storage = Storage(config=config)
         print("Database connection established.")
 
-        if args.summary:
+        if args.test_fix_api:
+            if not args.symbol:
+                parser.error("--symbol is required when using --test-fix-api")
+            print(f"--- Testing Fix API for symbol: {args.symbol}, days: {args.days} ---")
+            trigger_single_stock_fix(args.symbol, args.days)
+        elif args.summary:
             query_stock_summary(storage)
         elif args.check_per_stock:
-            check_missing_data_per_stock(storage, days_to_check=args.days, reference_symbol=args.ref_symbol)
+            check_missing_data_per_stock(storage, days_to_check=args.days, auto_fix=not args.no_fix)
         elif args.check_market_days:
             check_missing_market_days(storage, days_to_check=args.days)
         else:
             # Default action if no flag is provided
-            print("No action specified. Use --summary, --check-per-stock, or --check-market-days. Showing summary by default.")
+            print("No action specified. Use --summary, --check-per-stock, --check-market-days, or --test-fix-api. Showing summary by default.")
             query_stock_summary(storage)
     except Exception as e:
         print(f"A critical error occurred: {e}")
