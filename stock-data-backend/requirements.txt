@@ -8,3 +8,10 @@ numpy
 pytest
 pytest-mock
 akshare
+
+# Core web and ML dependencies
+flask
+uvicorn
+torch
+scikit-learn
+sqlalchemy

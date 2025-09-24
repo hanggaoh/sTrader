@@ -4,6 +4,7 @@ services:
   db:
     image: timescale/timescaledb:latest-pg16
     container_name: timescaledb
+    restart: always
     environment:
       POSTGRES_USER: strader_user
       POSTGRES_PASSWORD: my-secret-pw
@@ -12,6 +13,21 @@ services:
       - timescaledb-data:/var/lib/postgresql/data
     ports:
       - "5432:5432"
+
+  backend:
+    build:
+      context: ./stock-data-backend
+    restart: always
+    depends_on:
+      - db
+    environment:
+      - DB_HOST=db
+      - DB_NAME=strader_db
+      - DB_USER=strader_user
+      - DB_PASSWORD=my-secret-pw
+      - DB_PORT=5432
+    ports:
+      - "8000:8000"
 
 volumes:
   timescaledb-data:
