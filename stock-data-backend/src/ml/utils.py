@@ -17,6 +17,7 @@ import torch.nn as nn
 from sklearn.metrics import accuracy_score, f1_score
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader, Dataset
 
 from config import config
@@ -235,6 +236,9 @@ def train_loop(cfg: Config, df: pd.DataFrame, feats: List[str], logger):
     model = LSTMClassifier(len(feats), cfg.hidden_size, cfg.num_layers, cfg.dropout, cfg.bidirectional).to(device)
     criterion = nn.CrossEntropyLoss()
     opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+    # Add a learning rate scheduler to reduce LR when validation accuracy plateaus
+    scheduler = ReduceLROnPlateau(opt, mode='max', factor=0.2, patience=3, verbose=True)
+
     best_val_acc, best_state, patience = 0.0, None, cfg.early_stopping_patience
 
     logger.info(f"Training started: N_train={len(train_ds)}, N_val={len(val_ds)}, N_test={len(test_ds)}")
@@ -255,6 +259,9 @@ def train_loop(cfg: Config, df: pd.DataFrame, feats: List[str], logger):
         avg_train_loss = total_train_loss / len(train_loader)
         val_loss, val_acc, val_f1 = evaluate_classification(model, val_loader, device)
         logger.info(f"Epoch {epoch:03d} | train_loss={avg_train_loss:.4f} | val_loss={val_loss:.4f} | val_accuracy={val_acc:.4f} | val_f1={val_f1:.4f}")
+
+        # The scheduler monitors the validation accuracy
+        scheduler.step(val_acc)
 
         if val_acc > best_val_acc + 1e-4:
             best_val_acc, best_state, patience = val_acc, {k: v.cpu() for k, v in model.state_dict().items()}, cfg.early_stopping_patience
