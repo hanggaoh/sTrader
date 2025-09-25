@@ -73,9 +73,12 @@ def main():
     # For easy debugging, use a more powerful default config
     cfg = Config(
         train_sample_fraction=0.2, # Use 20% of stocks
-        epochs=20,                 # Train for more epochs
-        hidden_size=256,           # Deeper model
-        num_layers=3               # Deeper model
+        epochs=20,                 # Increase epochs slightly
+        hidden_size=128,           # A good baseline model size
+        num_layers=2,
+        lr=8e-4,                   # Increased learning rate for faster convergence
+        early_stopping_patience=5, # Stop if validation score doesn't improve
+        num_workers=4,             # Use worker processes to speed up data loading
     )
     # To use command-line arguments, comment the line above and uncomment the one below
     # cfg = parse_args()

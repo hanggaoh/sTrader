@@ -3,6 +3,7 @@ import logging
 import os
 import random
 import time
+from typing import List, Dict
 
 from apscheduler.executors.pool import ThreadPoolExecutor
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -10,181 +11,163 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from config import config
 from data.fetcher import StockDataFetcher
 from data.storage import Storage
+from data.sentiment import fetch_news_for_symbol, analyze_sentiment
 
 log = logging.getLogger(__name__)
 
 class TaskScheduler:
     def __init__(self):
         executors = {
-            # A dedicated executor for the time-sensitive daily cron job to ensure it's never blocked.
-            'cron_executor': ThreadPoolExecutor(max_workers=1),
-            # The default pool for on-demand API requests.
+            'cron_executor': ThreadPoolExecutor(max_workers=2),
             'default': ThreadPoolExecutor(max_workers=2),
-            # A dedicated executor for the very long-running backfill task.
-            # This prevents backfills from blocking the daily jobs.
             'backfill_executor': ThreadPoolExecutor(max_workers=1),
-            # A dedicated, single-threaded executor for repair jobs to prevent rate-limiting.
             'repair_executor': ThreadPoolExecutor(max_workers=1)
         }
-
-        job_defaults = {
-            # If a job was supposed to run while the scheduler was down,
-            # run it if the scheduler starts back up within 1 hour.
-            'misfire_grace_time': 3600
-        }
+        job_defaults = {'misfire_grace_time': 3600}
         self.scheduler = BackgroundScheduler(executors=executors, job_defaults=job_defaults)
         self.fetcher = StockDataFetcher()
         self.storage = Storage(config=config)
 
-    def _get_stock_symbols(self) -> list[str]:
-        """Helper method to load stock symbols from the JSON file."""
+    def _get_stock_list(self) -> List[Dict[str, str]]:
         json_path = os.path.join(os.path.dirname(__file__), '../data/chinese_stocks.json')
         try:
             with open(json_path, 'r') as f:
-                symbols = json.load(f)
-                if not isinstance(symbols, list):
-                    log.error(f"Stock symbols file at {json_path} is not a valid JSON list.")
+                stocks = json.load(f)
+                if not isinstance(stocks, list) or not all(isinstance(s, dict) and 'symbol' in s and 'name' in s for s in stocks):
+                    log.error(f"Stock file at {json_path} is not a valid JSON list of objects with 'symbol' and 'name' keys.")
                     return []
-                return symbols
+                return stocks
         except FileNotFoundError:
-            log.error(f"Stock symbols file not found at {json_path}")
+            log.error(f"Stock file not found at {json_path}")
         except json.JSONDecodeError:
-            log.error(f"Could not decode JSON from stock symbols file at {json_path}. Is it formatted correctly?")
+            log.error(f"Could not decode JSON from stock file at {json_path}.")
         return []
 
     def schedule_daily_tasks(self):
-        stock_symbols = self._get_stock_symbols()
-        if not stock_symbols:
-            log.warning("No symbols found, skipping daily task scheduling.")
+        stock_list = self._get_stock_list()
+        if not stock_list:
+            log.warning("No stocks found, skipping all daily task scheduling.")
             return
 
-        # Schedule a single master job to run daily.
-        # This avoids overwhelming the scheduler with thousands of individual cron jobs.
-        self.scheduler.add_job(
-            self._run_daily_fetch_loop,
-            'cron',
-            hour=4,
-            minute=0,
-            # Pass a robust number of days (e.g., 5) for the scheduled cron job.
-            # This ensures it can catch up even after long weekends or holidays.
-            args=[stock_symbols, 5],
-            id="master_daily_job",
-            replace_existing=True,
-            executor='cron_executor'  # Assign this job to its dedicated executor
-        )
-        log.info(f"Scheduled a single daily job for {len(stock_symbols)} stocks.")
+        # --- Schedule Daily Price Fetch ---
+        self.scheduler.add_job(self._run_daily_fetch_loop, 'cron', hour=4, minute=0, args=[[s['symbol'] for s in stock_list], 5], id="master_price_job", replace_existing=True, executor='cron_executor')
+        log.info(f"Scheduled daily price fetch job for {len(stock_list)} stocks.")
 
+        # --- Schedule Daily News Fetch ---
+        self.scheduler.add_job(self._run_daily_news_fetch_loop, 'cron', hour=5, minute=0, args=[stock_list], id="master_news_fetch_job", replace_existing=True, executor='cron_executor')
+        log.info(f"Scheduled daily news fetch job for {len(stock_list)} stocks.")
+
+        # --- Schedule Sentiment Analysis ---
+        self.scheduler.add_job(self._run_sentiment_analysis_loop, 'cron', hour=5, minute=15, id="master_sentiment_analysis_job", replace_existing=True, executor='cron_executor')
+        log.info("Scheduled sentiment analysis job.")
+
+    def _run_daily_news_fetch_loop(self, stock_list: List[Dict[str, str]]):
+        log.info(f"Starting master news fetch job for {len(stock_list)} stocks.")
+        for i, stock in enumerate(stock_list):
+            if (i + 1) % 50 == 0:
+                log.info(f"News fetch progress: {i + 1}/{len(stock_list)} stocks processed.")
+            try:
+                articles = fetch_news_for_symbol(stock['symbol'], stock['name'])
+                if articles:
+                    records_to_store = [(a['publishedAt'], stock['symbol'], a['title'], a['url']) for a in articles if a.get('title')]
+                    if records_to_store:
+                        self.storage.store_raw_news(records_to_store)
+                time.sleep(random.uniform(1.0, 2.0)) # Politeness delay
+            except Exception as e:
+                log.error(f"Error fetching news for {stock['symbol']}: {e}", exc_info=True)
+        log.info("Master news fetch job complete.")
+
+    def _run_sentiment_analysis_loop(self):
+        log.info("Starting sentiment analysis job.")
+        try:
+            pending_articles = self.storage.get_pending_sentiment_articles(limit=500) # Process in batches
+            if not pending_articles:
+                log.info("No pending articles to analyze.")
+                return
+
+            log.info(f"Found {len(pending_articles)} pending articles to analyze.")
+            results = []
+            for article_id, headline in pending_articles:
+                score = analyze_sentiment(headline)
+                if score is not None:
+                    results.append((score, article_id))
+            
+            if results:
+                self.storage.update_sentiment_scores(results)
+                log.info(f"Successfully analyzed and updated {len(results)} articles.")
+
+        except Exception as e:
+            log.error(f"An error occurred during the sentiment analysis loop: {e}", exc_info=True)
+        log.info("Sentiment analysis job complete.")
+
+    # ... (rest of the existing methods for price fetching) ...
     def run_daily_fetch_now(self, days=5):
-        """
-        Schedules a one-time, immediate job to fetch the latest daily data.
-        This is useful for running on application startup to ensure data is
-        fresh without waiting for the scheduled cron time.
-        """
-        stock_symbols = self._get_stock_symbols()
-        if not stock_symbols:
-            log.warning("No symbols found, skipping immediate daily fetch.")
+        stock_list = self._get_stock_list()
+        if not stock_list:
             return 0
-
         log.info("Scheduling an immediate one-time run of the daily fetch job.")
         self.scheduler.add_job(
-            self._run_daily_fetch_loop, args=[stock_symbols, days], id="immediate_daily_fetch", replace_existing=True
+            self._run_daily_fetch_loop, args=[[s['symbol'] for s in stock_list], days], id="immediate_daily_fetch", replace_existing=True
         )
-        return len(stock_symbols)
+        return len(stock_list)
 
     def fetch_single_stock_now(self, symbol: str, days: int = 5):
-        """
-        Schedules a one-time, immediate job to fetch the latest daily data
-        for a single stock symbol.
-
-        Args:
-            symbol (str): The stock symbol to fetch.
-            days (int): The number of recent days to fetch data for.
-        """
         log.info(f"Scheduling an immediate one-time fetch for {symbol} for the last {days} days.")
         period_str = f"{days}d"
-        # Use a unique job ID to allow multiple single-stock fetches to be scheduled.
         job_id = f"fetch_single_{symbol}_{int(time.time())}"
         self.scheduler.add_job(
-            self._fetch_and_store,
+            self._fetch_and_store_price,
             args=[symbol, period_str, "single-fetch"],
             id=job_id,
-            replace_existing=False,  # Allow multiple ad-hoc fetches
-            executor='repair_executor'  # Assign to the single-threaded executor
+            replace_existing=False,
+            executor='repair_executor'
         )
 
     def schedule_backfill_tasks(self):
-        """Schedules a single, one-time job to run the entire backfill process."""
-        stock_symbols = self._get_stock_symbols()
-        if not stock_symbols:
+        stock_list = self._get_stock_list()
+        if not stock_list:
             return 0
-
-        # Schedule a single job that will iterate through all stocks.
-        # This avoids overwhelming the scheduler with thousands of queued jobs.
         self.scheduler.add_job(
             self._run_full_backfill_loop,
-            args=[stock_symbols],
+            args=[stock_list],
             id="master_backfill_job",
             replace_existing=True,
-            executor='backfill_executor'  # Assign this job to the dedicated executor
+            executor='backfill_executor'
         )
-        log.info(f"Scheduled a single backfill job for {len(stock_symbols)} stocks.")
-        return len(stock_symbols)
+        log.info(f"Scheduled a single backfill job for {len(stock_list)} stocks.")
+        return len(stock_list)
 
-    def _run_full_backfill_loop(self, stock_symbols: list[str]):
-        """
-        The actual backfill process, run as a single long-running job.
-        It iterates through all symbols and fetches their history, but only for
-        symbols that are not already in the database.
-        """
-        total_symbols = len(stock_symbols)
+    def _run_full_backfill_loop(self, stock_list: List[Dict[str, str]]):
+        total_stocks = len(stock_list)
         new_symbols_processed = 0
-        log.info(f"Starting master backfill job for {total_symbols} symbols.")
-        for i, symbol in enumerate(stock_symbols):
-            # Log progress periodically to show the job is still running.
+        log.info(f"Starting master backfill job for {total_stocks} stocks.")
+        for i, stock in enumerate(stock_list):
             if (i + 1) % 100 == 0:
-                log.info(f"Backfill progress: {i + 1}/{total_symbols} symbols checked.")
+                log.info(f"Backfill progress: {i + 1}/{total_stocks} stocks checked.")
 
-            # QA Query: Check if the stock already exists in the database.
-            # This prevents re-fetching the entire history for existing stocks.
-            if self.storage.symbol_exists(symbol):
-                log.debug(f"Skipping backfill for {symbol}; data already exists.")
+            if self.storage.symbol_exists(stock['symbol']):
+                log.debug(f"Skipping backfill for {stock['symbol']}; data already exists.")
                 continue
 
-            # If the symbol is new, fetch its full history.
-            log.info(f"New symbol found: {symbol}. Starting full history backfill.")
-            self._fetch_and_store(symbol, period="max", job_type="backfill")
+            log.info(f"New symbol found: {stock['symbol']}. Starting full history backfill.")
+            self._fetch_and_store_price(stock['symbol'], period="max", job_type="backfill")
             new_symbols_processed += 1
-        
-        log.info(f"Master backfill job completed. Checked {total_symbols} symbols, processed {new_symbols_processed} new symbols.")
+        log.info(f"Master backfill job completed. Checked {total_stocks} stocks, processed {new_symbols_processed} new symbols.")
 
     def _run_daily_fetch_loop(self, stock_symbols: list[str], days: int):
-        """
-        The actual daily fetch process, run as a single long-running job.
-        It iterates through all symbols and fetches their recent history.
-
-        Args:
-            stock_symbols (list[str]): List of stock symbols to process.
-            days (int): The number of recent days to fetch.
-        """
         period_str = f"{days}d"
         total_symbols = len(stock_symbols)
-        log.info(f"Starting master daily fetch job for {total_symbols} symbols, fetching last {period_str}.")
+        log.info(f"Starting master daily price fetch job for {total_symbols} symbols, fetching last {period_str}.")
         for i, symbol in enumerate(stock_symbols):
-            # Log progress periodically to show the job is still running.
             if (i + 1) % 100 == 0:
-                log.info(f"Daily fetch progress: {i + 1}/{total_symbols} symbols processed.")
-            
-            self._fetch_and_store(symbol, period=period_str, job_type="daily")
-        
-        log.info(f"Master daily fetch job completed for all {total_symbols} symbols.")
+                log.info(f"Daily price fetch progress: {i + 1}/{total_symbols} symbols processed.")
+            self._fetch_and_store_price(symbol, period=period_str, job_type="daily")
+        log.info(f"Master daily price fetch job completed for all {total_symbols} symbols.")
 
-    def _fetch_and_store(self, symbol: str, period: str, job_type: str):
-        """Private helper to fetch, store, and log stock data."""
+    def _fetch_and_store_price(self, symbol: str, period: str, job_type: str):
         log.info(f"Running {job_type} job for symbol: {symbol}")
-
         max_retries = 3
-        backoff_factor = 5  # Start with a 5-second delay
-
+        backoff_factor = 5
         for attempt in range(max_retries):
             try:
                 data = self.fetcher.fetch_historical_data(symbol, period=period)
@@ -193,26 +176,19 @@ class TaskScheduler:
                     log.info(f"Successfully stored {len(data)} records for {symbol} ({job_type}).")
                 else:
                     log.warning(f"No data fetched for {symbol} ({job_type}). It might be a holiday or an invalid symbol.")
-
-                # Success, so we add the politeness delay and exit the function.
                 time.sleep(random.uniform(2.0, 3.5))
-                return  # Exit successfully
-
+                return
             except Exception as e:
                 log.warning(f"Attempt {attempt + 1}/{max_retries} failed for {symbol} with error: {e}")
                 if attempt + 1 < max_retries:
-                    # Exponential backoff: wait 5s, then 10s, etc.
                     sleep_time = backoff_factor * (attempt + 1)
                     log.info(f"Will retry fetching {symbol} in {sleep_time} seconds...")
                     time.sleep(sleep_time)
                 else:
                     log.error(f"All {max_retries} retries failed for {symbol}. Giving up.", exc_info=True)
-
-        # This part is reached only if all retries fail. We still add the politeness delay.
         time.sleep(random.uniform(2.0, 3.5))
 
     def start(self):
-        """Starts the scheduler if it is not already running."""
         if not self.scheduler.running:
             self.scheduler.start()
             log.info("Scheduler started.")

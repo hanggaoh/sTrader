@@ -16,3 +16,7 @@ torch
 scikit-learn
 sqlalchemy
 gunicorn
+
+# New dependencies for sentiment analysis
+requests
+transformers

@@ -132,6 +132,13 @@ def build_features(df: pd.DataFrame, cfg: Config, logger) -> Tuple[pd.DataFrame,
     # Target is 1 if the price goes up in the next `horizon` periods, 0 otherwise.
     df["target"] = (df.groupby('symbol')['close'].shift(-cfg.horizon) > df['close']).astype(int)
     
+    # --- Diagnostic Logging: Target Distribution ---
+    # Check if the target variable is imbalanced. If it's all 0s or 1s, the model can't learn.
+    target_dist = df['target'].value_counts(normalize=True)
+    logger.info(f"Target variable distribution:\n{target_dist}")
+    if len(target_dist) < 2:
+        logger.warning("The target variable has only one class! The model will not be able to learn.")
+
     base_feats = ['open', 'high', 'low', 'close', 'volume', 'sentiment', 'sma_20', 'sma_50', 'ema_20', 'rsi']
     feats = cfg.features or base_feats
     df = df.dropna(subset=feats + ["target"]).copy()
@@ -141,19 +148,11 @@ def build_features(df: pd.DataFrame, cfg: Config, logger) -> Tuple[pd.DataFrame,
 class SequenceDataset(Dataset):
     def __init__(self, df: pd.DataFrame, feats: List[str], window: int):
         self.samples = []
-        self.feats = feats
-        self.window = window
-        
-        self.x_scaler = StandardScaler()
-        self.x_scaler.fit(df[self.feats].values)
-        
-        df_transformed = df.copy()
-        df_transformed[self.feats] = self.x_scaler.transform(df[self.feats].values)
-
-        for sym, g in df_transformed.groupby("symbol"):
+        # The dataframe is now expected to be pre-scaled before being passed here.
+        for sym, g in df.groupby("symbol"):
             if len(g) < window + 1:
                 continue
-            X = g[self.feats].values.astype(np.float32)
+            X = g[feats].values.astype(np.float32)
             y = g["target"].values.astype(np.int64) # Target for classification should be int
             for i in range(window, len(g)):
                 self.samples.append((X[i - window : i], y[i]))
@@ -165,52 +164,73 @@ class SequenceDataset(Dataset):
         x, y = self.samples[idx]
         return torch.from_numpy(x), torch.tensor(y, dtype=torch.long) # Use torch.long for CrossEntropyLoss
 
-    def get_scaler(self):
-        return self.x_scaler
-
 # ----------------------
 # TRAINING & ORCHESTRATION
 # ----------------------
 @torch.no_grad()
 def evaluate_classification(model, loader, device):
     model.eval()
-    all_preds, all_labels = [], []
+    all_preds, all_labels, total_loss = [], [], 0.0
+    criterion = nn.CrossEntropyLoss() # To calculate validation loss
+
     for xb, yb in loader:
         xb, yb = xb.to(device), yb.to(device)
         logits = model(xb)
+        loss = criterion(logits, yb)
+        total_loss += loss.item() * xb.size(0)
         preds = torch.argmax(logits, dim=1)
         all_preds.extend(preds.cpu().numpy())
         all_labels.extend(yb.cpu().numpy())
     
     accuracy = accuracy_score(all_labels, all_preds)
     f1 = f1_score(all_labels, all_preds, average='weighted')
-    return accuracy, f1
+    avg_loss = total_loss / len(all_labels)
+    return avg_loss, accuracy, f1
 
 def train_loop(cfg: Config, df: pd.DataFrame, feats: List[str], logger):
     device = torch.device(cfg.device)
     logger.info(f"Using device: {device}")
-    full_ds = SequenceDataset(df, feats, cfg.window)
-    scaler = full_ds.get_scaler()
-    idx = np.arange(len(full_ds))
-    train_idx, tmp_idx = train_test_split(idx, test_size=cfg.val_size + cfg.test_size, random_state=cfg.seed, shuffle=True)
-    rel_val = cfg.val_size / (cfg.val_size + cfg.test_size)
-    val_idx, test_idx = train_test_split(tmp_idx, test_size=1 - rel_val, random_state=cfg.seed, shuffle=True)
-    
-    def subset(ds, indices):
-        class _Subset(Dataset):
-            def __init__(self, base, ids):
-                self.base = base
-                self.ids = ids
-            def __len__(self):
-                return len(self.ids)
-            def __getitem__(self, i):
-                return self.base[self.ids[i]]
-        return _Subset(ds, indices)
 
-    train_ds, val_ds, test_ds = subset(full_ds, train_idx), subset(full_ds, val_idx), subset(full_ds, test_idx)
+    # --- Data Splitting and Scaling (Time-based split) ---
+    # This approach is more realistic for financial time series.
+    # We train on all stocks up to a certain point in time and validate/test on a later period.
+    df = df.sort_values('timestamp')
+    last_date = df['timestamp'].max()
+    test_split_date = last_date - pd.DateOffset(days=int(len(df['timestamp'].unique()) * cfg.test_size))
+    val_split_date = test_split_date - pd.DateOffset(days=int(len(df['timestamp'].unique()) * cfg.val_size))
+
+    train_df = df[df['timestamp'] < val_split_date].copy()
+    val_df = df[(df['timestamp'] >= val_split_date) & (df['timestamp'] < test_split_date)].copy()
+    test_df = df[df['timestamp'] >= test_split_date].copy()
+
+    logger.info(f"Splitting data by time:")
+    logger.info(f"  - Train: Before {val_split_date.date()}")
+    logger.info(f"  - Val:   {val_split_date.date()} to {test_split_date.date()}")
+    logger.info(f"  - Test:  After {test_split_date.date()}")
+
+    # Fit scaler ONLY on training data to prevent leakage
+    scaler = StandardScaler()
+    train_df.loc[:, feats] = scaler.fit_transform(train_df[feats])
+    # Use the same scaler to transform validation and test data
+    val_df.loc[:, feats] = scaler.transform(val_df[feats])
+    test_df.loc[:, feats] = scaler.transform(test_df[feats])
+
+    train_ds = SequenceDataset(train_df, feats, cfg.window)
+    val_ds = SequenceDataset(val_df, feats, cfg.window)
+    test_ds = SequenceDataset(test_df, feats, cfg.window)
+
     train_loader = DataLoader(train_ds, batch_size=cfg.batch_size, shuffle=True, num_workers=cfg.num_workers)
     val_loader = DataLoader(val_ds, batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers)
     test_loader = DataLoader(test_ds, batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers)
+
+    # --- Diagnostic Logging: Check a single batch ---
+    try:
+        x_sample, y_sample = next(iter(train_loader))
+        logger.info(f"Sample batch shapes: X={x_sample.shape}, y={y_sample.shape}")
+        logger.info(f"Sample batch types: X={x_sample.dtype}, y={y_sample.dtype}")
+    except StopIteration:
+        logger.error("Training loader is empty! Cannot proceed with training.")
+        return None, None, {}
 
     model = LSTMClassifier(len(feats), cfg.hidden_size, cfg.num_layers, cfg.dropout, cfg.bidirectional).to(device)
     criterion = nn.CrossEntropyLoss()
@@ -218,9 +238,11 @@ def train_loop(cfg: Config, df: pd.DataFrame, feats: List[str], logger):
     best_val_acc, best_state, patience = 0.0, None, cfg.early_stopping_patience
 
     logger.info(f"Training started: N_train={len(train_ds)}, N_val={len(val_ds)}, N_test={len(test_ds)}")
+    logger.info(f"Model details: {model}")
     for epoch in range(1, cfg.epochs + 1):
         model.train()
-        for xb, yb in train_loader:
+        total_train_loss = 0.0
+        for i, (xb, yb) in enumerate(train_loader):
             xb, yb = xb.to(device), yb.to(device)
             opt.zero_grad()
             logits = model(xb)
@@ -228,9 +250,11 @@ def train_loop(cfg: Config, df: pd.DataFrame, feats: List[str], logger):
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), cfg.clip_grad)
             opt.step()
+            total_train_loss += loss.item()
         
-        val_acc, val_f1 = evaluate_classification(model, val_loader, device)
-        logger.info(f"Epoch {epoch:03d} | val_accuracy={val_acc:.4f} | val_f1={val_f1:.4f}")
+        avg_train_loss = total_train_loss / len(train_loader)
+        val_loss, val_acc, val_f1 = evaluate_classification(model, val_loader, device)
+        logger.info(f"Epoch {epoch:03d} | train_loss={avg_train_loss:.4f} | val_loss={val_loss:.4f} | val_accuracy={val_acc:.4f} | val_f1={val_f1:.4f}")
 
         if val_acc > best_val_acc + 1e-4:
             best_val_acc, best_state, patience = val_acc, {k: v.cpu() for k, v in model.state_dict().items()}, cfg.early_stopping_patience
@@ -242,10 +266,10 @@ def train_loop(cfg: Config, df: pd.DataFrame, feats: List[str], logger):
     if best_state:
         model.load_state_dict(best_state)
     
-    test_acc, test_f1 = evaluate_classification(model, test_loader, device)
-    logger.info(f"Final Test Accuracy: {test_acc:.4f}")
-    logger.info(f"Final Test F1-Score: {test_f1:.4f}")
-    return model, scaler, {"test_accuracy": test_acc, "test_f1": test_f1}
+    test_loss, test_acc, test_f1 = evaluate_classification(model, test_loader, device)
+    logger.info(f"Final Test Loss: {test_loss:.4f}")
+    logger.info(f"Final Test Accuracy: {test_acc:.4f} | Final Test F1-Score: {test_f1:.4f}")
+    return model, scaler, {"test_loss": test_loss, "test_accuracy": test_acc, "test_f1": test_f1}
 
 def prepare_data(cfg: Config, storage: Storage, logger) -> tuple[pd.DataFrame | None, list | None]:
     sql_query = "SELECT time, stock_symbol, open, high, low, close, volume FROM stock_data WHERE time BETWEEN '2020-01-01' AND '2024-12-31'"

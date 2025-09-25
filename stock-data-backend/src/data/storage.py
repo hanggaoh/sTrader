@@ -12,151 +12,119 @@ log = logging.getLogger(__name__)
 class Storage:
     """
     Manages database interactions with a TimescaleDB/PostgreSQL database.
-    Handles connection, schema setup, and data storage/retrieval using a thread-safe connection pool.
     """
 
     def __init__(self, config: Config):
-        """
-        Initializes a thread-safe database connection pool.
-        """
         conninfo = (
             f"dbname={config.db_name} user={config.db_user} "
             f"password={config.db_password} host={config.db_host} port={config.db_port}"
         )
         try:
-            # Create a connection pool. min_size=1 to keep at least one connection open.
-            # max_size should be >= number of concurrent workers in the scheduler.
             self.pool = ConnectionPool(conninfo, min_size=1, max_size=5)
         except psycopg.OperationalError as e:
             log.error(f"Could not connect to the database. Please check connection settings.", exc_info=True)
             raise e
 
     def setup_database(self):
-        """
-        Creates the necessary table for stock data and converts it into a
-        TimescaleDB hypertable for efficient time-series data handling.
-        """
         log.info("Setting up database schema...")
-        create_table_query = """
+        create_stock_table_query = """
         CREATE TABLE IF NOT EXISTS stock_data (
             time TIMESTAMPTZ NOT NULL,
             stock_symbol VARCHAR(20) NOT NULL,
-            open DOUBLE PRECISION,
-            high DOUBLE PRECISION,
-            low DOUBLE PRECISION,
-            close DOUBLE PRECISION,
-            volume BIGINT,
+            open DOUBLE PRECISION, high DOUBLE PRECISION, low DOUBLE PRECISION, close DOUBLE PRECISION, volume BIGINT,
             PRIMARY KEY (time, stock_symbol)
         );
         """
-        
-        create_hypertable_query = """
-        SELECT create_hypertable('stock_data', 'time', if_not_exists => TRUE);
+        create_stock_hypertable_query = "SELECT create_hypertable('stock_data', 'time', if_not_exists => TRUE);"
+
+        create_sentiment_table_query = """
+        CREATE TABLE IF NOT EXISTS news_sentiment (
+            id BIGSERIAL PRIMARY KEY,
+            published_at TIMESTAMPTZ NOT NULL,
+            stock_symbol VARCHAR(20) NOT NULL,
+            headline TEXT UNIQUE, -- Ensure headlines are unique to avoid duplicates
+            source_url TEXT,
+            sentiment_score DOUBLE PRECISION DEFAULT NULL, -- Store the raw score
+            status VARCHAR(20) DEFAULT 'PENDING' -- PENDING, PROCESSED, FAILED
+        );
         """
+        create_sentiment_hypertable_query = "SELECT create_hypertable('news_sentiment', 'published_at', if_not_exists => TRUE);"
         
-        # Use a connection from the pool for this operation.
         with self.pool.connection() as conn:
             with conn.cursor() as cursor:
-                cursor.execute(create_table_query)
-                # The TimescaleDB extension needs to be enabled for create_hypertable to work.
-                # The official Docker image has it enabled by default.
-                cursor.execute(create_hypertable_query)
+                log.info("Creating and configuring 'stock_data' table...")
+                cursor.execute(create_stock_table_query)
+                cursor.execute(create_stock_hypertable_query)
+                
+                log.info("Creating and configuring 'news_sentiment' table...")
+                cursor.execute(create_sentiment_table_query)
+                cursor.execute(create_sentiment_hypertable_query)
+
         log.info("Schema setup complete.")
 
-    def store_historical_data(self, stock_symbol: str, data: pd.DataFrame):
+    def store_raw_news(self, articles: list):
+        """Inserts raw news articles with a 'PENDING' status, ignoring duplicates."""
+        if not articles:
+            return 0
+        
+        sql = """
+            INSERT INTO news_sentiment (published_at, stock_symbol, headline, source_url)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (headline) DO NOTHING;
         """
-        Stores historical stock data from a pandas DataFrame into the database.
-        It performs an "upsert" operation: inserting new rows and updating
-        existing ones based on the (time, stock_symbol) primary key.
+        with self.pool.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.executemany(sql, articles)
+                return cursor.rowcount
 
-        Args:
-            stock_symbol (str): The stock ticker symbol.
-            data (pd.DataFrame): DataFrame with historical data. Must have a
-                                 DatetimeIndex and columns for Open, High,
-                                 Low, Close, and Volume.
-        """
+    def get_pending_sentiment_articles(self, limit: int = 100) -> list:
+        """Fetches articles that have not yet been processed."""
+        sql = "SELECT id, headline FROM news_sentiment WHERE status = 'PENDING' LIMIT %s;"
+        with self.pool.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(sql, (limit,))
+                return cursor.fetchall()
+
+    def update_sentiment_scores(self, results: list):
+        """Bulk updates articles with their calculated sentiment scores."""
+        if not results:
+            return
+            
+        sql = "UPDATE news_sentiment SET sentiment_score = %s, status = 'PROCESSED' WHERE id = %s;"
+        with self.pool.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.executemany(sql, results)
+
+    def store_historical_data(self, stock_symbol: str, data: pd.DataFrame):
         if data.empty:
             return
-
-        # Prepare data for bulk copy. This is significantly faster than row-by-row inserts.
         data_to_copy = data.copy()
-        # Sanitize column names to lowercase to match the database schema.
-        # This makes the storage layer robust to the capitalization of input data.
         data_to_copy.columns = [c.lower() for c in data_to_copy.columns]
         data_to_copy['stock_symbol'] = stock_symbol
-        # Ensure column order matches the temporary table for COPY
         data_to_copy = data_to_copy[['stock_symbol', 'open', 'high', 'low', 'close', 'volume']]
-
-        # Use an in-memory buffer to stage the data as a CSV
         buffer = io.StringIO()
         data_to_copy.to_csv(buffer, index=True, header=False)
         buffer.seek(0)
-
-        # Use a dedicated connection from the pool for this transaction.
         with self.pool.connection() as conn:
             with conn.cursor() as cursor:
-                # 1. Create a temporary table that will be automatically dropped at the end of the transaction.
-                cursor.execute("""
-                    CREATE TEMP TABLE temp_stock_data (
-                        time TIMESTAMPTZ NOT NULL,
-                        stock_symbol VARCHAR(20) NOT NULL,
-                        open DOUBLE PRECISION,
-                        high DOUBLE PRECISION,
-                        low DOUBLE PRECISION,
-                        close DOUBLE PRECISION,
-                        volume BIGINT
-                    ) ON COMMIT DROP;
-                """)
-
-                # 2. Use the high-performance COPY command to load data into the temp table.
+                cursor.execute("CREATE TEMP TABLE temp_stock_data (LIKE stock_data) ON COMMIT DROP;")
                 with cursor.copy("COPY temp_stock_data (time, stock_symbol, open, high, low, close, volume) FROM STDIN WITH (FORMAT CSV)") as copy:
                     copy.write(buffer.read())
-
-                # 3. Merge data from the temp table into the main table, updating on conflict.
-                # This is the standard "bulk upsert" pattern.
                 cursor.execute("""
-                    INSERT INTO stock_data (time, stock_symbol, open, high, low, close, volume)
-                    SELECT time, stock_symbol, open, high, low, close, volume FROM temp_stock_data
+                    INSERT INTO stock_data SELECT * FROM temp_stock_data
                     ON CONFLICT (time, stock_symbol) DO UPDATE SET
-                        open = EXCLUDED.open,
-                        high = EXCLUDED.high,
-                        low = EXCLUDED.low,
-                        close = EXCLUDED.close,
-                        volume = EXCLUDED.volume;
+                        open = EXCLUDED.open, high = EXCLUDED.high, low = EXCLUDED.low,
+                        close = EXCLUDED.close, volume = EXCLUDED.volume;
                 """)
 
     def symbol_exists(self, stock_symbol: str) -> bool:
-        """
-        Checks if any data for a given stock symbol already exists in the database.
-        This is an efficient query to avoid fetching data for stocks that have
-        already been backfilled.
-
-        Args:
-            stock_symbol (str): The stock ticker symbol to check.
-
-        Returns:
-            bool: True if data for the symbol exists, False otherwise.
-        """
         query = "SELECT 1 FROM stock_data WHERE stock_symbol = %s LIMIT 1;"
         with self.pool.connection() as conn:
             with conn.cursor() as cursor:
                 cursor.execute(query, (stock_symbol,))
-                # fetchone() returns a tuple if a row is found, otherwise None.
-                # We convert this to a boolean.
                 return cursor.fetchone() is not None
 
-    def read_historical_data(self, stock_symbol: str) -> pd.DataFrame:
-        """
-        Reads historical data for a given stock symbol from the database.
-        """
-        with self.pool.connection() as conn:
-            # This method is included for completeness but not used by the scheduler.
-            query = "SELECT * FROM stock_data WHERE stock_symbol = %s ORDER BY time;"
-            df = pd.read_sql(query, conn, params=(stock_symbol,), index_col='time')
-        return df
-
     def close(self):
-        """Closes the database connection pool."""
         if self.pool:
             self.pool.close()
             log.info("Database connection pool closed.")
