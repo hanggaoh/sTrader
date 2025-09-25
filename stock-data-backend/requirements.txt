@@ -1,4 +1,4 @@
-psycopg[binary]
+psycopg[binary,pool]
 cryptography
 python-dotenv
 yfinance
@@ -15,3 +15,4 @@ uvicorn
 torch
 scikit-learn
 sqlalchemy
+gunicorn

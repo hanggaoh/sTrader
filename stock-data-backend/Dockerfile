@@ -4,10 +4,11 @@ FROM python:3.10-slim
 # Set the initial working directory
 WORKDIR /app
 
-# Install system dependencies needed for binary package builds
+# Install system dependencies, including curl for the health check
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libpq-dev \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the requirements file first to leverage Docker cache
@@ -20,8 +21,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Set the final working directory to the src folder
-# This makes all intra-application imports work correctly
 WORKDIR /app/src
 
-# Command to run the application from within the src directory
-CMD ["python", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+# Command to run the application with Gunicorn
+CMD ["gunicorn", "--bind", "0.0.0.0:8000", "app:app"]

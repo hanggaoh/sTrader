@@ -3,11 +3,19 @@ from scheduler.task import TaskScheduler
 import os
 import atexit
 import logging
-import logger_config
 
 app = Flask(__name__)
 
-log = logging.getLogger(__name__)
+# --- Gunicorn Logger Integration ---
+# When running with Gunicorn, it provides its own logger.
+# We integrate with it to ensure all logs go to the correct output stream.
+if __name__ != "__main__":
+    gunicorn_logger = logging.getLogger("gunicorn.error")
+    app.logger.handlers = gunicorn_logger.handlers
+    app.logger.setLevel(gunicorn_logger.level)
+# --------------------------------
+
+log = app.logger
 
 # Instantiate the scheduler once.
 scheduler = TaskScheduler()
@@ -19,6 +27,11 @@ atexit.register(lambda: scheduler.stop())
 @app.route('/')
 def index():
     return "Stock data scheduler is running."
+
+@app.route('/health')
+def health_check():
+    """A simple health check endpoint that returns a 200 OK status."""
+    return jsonify({"status": "healthy"}), 200
 
 @app.route('/trigger-backfill', methods=['PUT'])
 def trigger_backfill():
@@ -43,8 +56,6 @@ def trigger_daily_fetch():
     
     days = 5
     try:
-        # Use silent=True to avoid an exception if the body is not JSON or mimetype is wrong.
-        # It will return None in that case, and the default 'days' will be used.
         data = request.get_json(silent=True)
         if data and 'days' in data:
             parsed_days = int(data['days'])
@@ -93,14 +104,9 @@ def trigger_fetch_single():
     }), 202
 
 if __name__ == "__main__":
-    # Schedule the daily recurring tasks
+    # This block is for local development only (e.g., running `python src/app.py`)
+    # It will not be executed when running with Gunicorn in Docker.
+    logging.basicConfig(level=logging.INFO)
     scheduler.schedule_daily_tasks()
-
-    # Start the scheduler. When Flask is in debug mode, it uses a reloader
-    # that will restart this process on code changes. The scheduler will be
-    # correctly instantiated and started in the new child process.
     scheduler.start()
-
-    # For development, it's helpful to run with debug=True.
-    # For production, use a proper WSGI server like Gunicorn or uWSGI.
     app.run(port=5000, debug=True)
