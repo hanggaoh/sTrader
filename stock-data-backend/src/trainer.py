@@ -74,9 +74,10 @@ def main():
     cfg = Config(
         train_sample_fraction=0.2, # Use 20% of stocks
         epochs=30,                 # Allow more epochs for the scheduler to work
-        hidden_size=128,           # A good baseline model size
+        hidden_size=512,           # A larger model to capture more complex patterns
         num_layers=2,
         lr=5e-4,                   # A moderate starting learning rate
+        batch_size=512,            # Increase batch size to stabilize training for the larger model
         early_stopping_patience=7, # A bit more patience for early stopping
         num_workers=4,             # Use worker processes to speed up data loading
     )
