@@ -72,7 +72,7 @@ def main():
 
     # For easy debugging, use a more powerful default config
     cfg = Config(
-        train_sample_fraction=0.2, # Use 20% of stocks
+        train_sample_fraction=0.4, # Use 20% of stocks
         epochs=30,                 # Allow more epochs for the scheduler to work
         hidden_size=512,           # A larger model to capture more complex patterns
         num_layers=2,
@@ -80,6 +80,7 @@ def main():
         batch_size=512,            # Increase batch size to stabilize training for the larger model
         early_stopping_patience=7, # A bit more patience for early stopping
         num_workers=4,             # Use worker processes to speed up data loading
+        window=90,
     )
     # To use command-line arguments, comment the line above and uncomment the one below
     # cfg = parse_args()
