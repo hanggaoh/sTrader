@@ -8,20 +8,20 @@ import random
 import unittest
 from dataclasses import asdict, dataclass
 from datetime import datetime
-from typing import List, Optional, Tuple, Dict
+from typing import List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-from sklearn.metrics import accuracy_score, f1_score
-from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, f1_score, confusion_matrix, classification_report
 from sklearn.preprocessing import StandardScaler
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader, Dataset
 
 from config import config
 from data.storage import Storage
+
 
 # ----------------------
 # CONFIGURATION
@@ -53,6 +53,7 @@ class Config:
     val_size: float = 0.1
     test_size: float = 0.1
     early_stopping_patience: int = 7
+    label_smoothing: float = 0.0
     clip_grad: float = 1.0
     num_workers: int = 0
     device: str = (
@@ -119,15 +120,57 @@ def build_features(df: pd.DataFrame, cfg: Config, logger) -> Tuple[pd.DataFrame,
     logger.info("Building features...")
     df = df.copy()
 
-    # --- Technical Indicators ---
+    # --- Trend Indicators ---
+    df['sma_5'] = df.groupby('symbol')['close'].transform(lambda s: s.rolling(5).mean())
+    df['sma_10'] = df.groupby('symbol')['close'].transform(lambda s: s.rolling(10).mean())
     df['sma_20'] = df.groupby('symbol')['close'].transform(lambda s: s.rolling(20).mean())
     df['sma_50'] = df.groupby('symbol')['close'].transform(lambda s: s.rolling(50).mean())
     df['ema_20'] = df.groupby('symbol')['close'].transform(lambda s: s.ewm(span=20, adjust=False).mean())
+    
+    # MACD
+    ema_12 = df.groupby('symbol')['close'].transform(lambda s: s.ewm(span=12, adjust=False).mean())
+    ema_26 = df.groupby('symbol')['close'].transform(lambda s: s.ewm(span=26, adjust=False).mean())
+    df['macd'] = ema_12 - ema_26
+    df['macd_signal'] = df.groupby('symbol')['macd'].transform(lambda s: s.ewm(span=9, adjust=False).mean())
+    df['macd_hist'] = df['macd'] - df['macd_signal']
+
+    # --- Momentum Indicators ---
     delta = df.groupby('symbol')['close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
     df['rsi'] = 100 - (100 / (1 + rs))
+    
+    df['return_1d'] = df.groupby('symbol')['close'].pct_change(1)
+    df['return_5d'] = df.groupby('symbol')['close'].pct_change(5)
+    df['return_21d'] = df.groupby('symbol')['close'].pct_change(21)
+
+    # --- Volatility Indicators ---
+    df['volatility_21d'] = df.groupby('symbol')['return_1d'].transform(lambda s: s.rolling(21).std())
+    
+    # ATR
+    high_low = df['high'] - df['low']
+    high_close = np.abs(df['high'] - df.groupby('symbol')['close'].shift())
+    low_close = np.abs(df['low'] - df.groupby('symbol')['close'].shift())
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    df['atr'] = tr.ewm(span=14, adjust=False).mean()
+
+    # ADX
+    plus_dm = df.groupby('symbol')['high'].diff()
+    minus_dm = df.groupby('symbol')['low'].diff().mul(-1)
+    plus_dm[plus_dm < 0] = 0
+    plus_dm[plus_dm < minus_dm] = 0
+    minus_dm[minus_dm < 0] = 0
+    minus_dm[minus_dm < plus_dm] = 0
+    tr14 = tr.rolling(14).sum()
+    plus_di = 100 * (plus_dm.ewm(alpha=1/14).mean() / tr14)
+    minus_di = 100 * (minus_dm.ewm(alpha=1/14).mean() / tr14)
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    df['adx'] = dx.ewm(alpha=1/14).mean()
+
+    # --- Distributional Features ---
+    df['skew_21d'] = df.groupby('symbol')['return_1d'].transform(lambda s: s.rolling(21).skew())
+    df['kurt_21d'] = df.groupby('symbol')['return_1d'].transform(lambda s: s.rolling(21).kurt())
 
     # --- Target Variable (Classification) ---
     # Target is 1 if the price goes up in the next `horizon` periods, 0 otherwise.
@@ -137,10 +180,31 @@ def build_features(df: pd.DataFrame, cfg: Config, logger) -> Tuple[pd.DataFrame,
     # Check if the target variable is imbalanced. If it's all 0s or 1s, the model can't learn.
     target_dist = df['target'].value_counts(normalize=True)
     logger.info(f"Target variable distribution:\n{target_dist}")
-    if len(target_dist) < 2:
+    if len(target_dist) < 2: 
         logger.warning("The target variable has only one class! The model will not be able to learn.")
-
-    base_feats = ['open', 'high', 'low', 'close', 'volume', 'sentiment', 'sma_20', 'sma_50', 'ema_20', 'rsi']
+    else:
+        majority_frac = target_dist.max()
+        logger.info(f"Sanity Check: Majority class fraction is {majority_frac:.4f}. A good model must beat this accuracy.")
+        
+    base_feats = [
+        # Price & Volume
+        'open', 'high', 'low', 'close', 'volume', 
+        # Sentiment
+        'sentiment', 
+        # Trend
+        'sma_5', 'sma_10', 'sma_20', 'sma_50', 'ema_20', 
+        'macd', 'macd_signal', 'macd_hist',
+        'adx',
+        # Momentum
+        'rsi', 
+        'return_1d', 'return_5d', 'return_21d',
+        # Volatility
+        'volatility_21d',
+        'atr',
+        # Distribution
+        'skew_21d',
+        'kurt_21d',
+    ]
     feats = cfg.features or base_feats
     df = df.dropna(subset=feats + ["target"]).copy()
     logger.info(f"Finished building features. Final dataset shape: {df.shape}")
@@ -169,7 +233,7 @@ class SequenceDataset(Dataset):
 # TRAINING & ORCHESTRATION
 # ----------------------
 @torch.no_grad()
-def evaluate_classification(model, loader, device):
+def evaluate_classification(model, loader, device, logger, log_report: bool = False):
     model.eval()
     all_preds, all_labels, total_loss = [], [], 0.0
     criterion = nn.CrossEntropyLoss() # To calculate validation loss
@@ -185,6 +249,11 @@ def evaluate_classification(model, loader, device):
     
     accuracy = accuracy_score(all_labels, all_preds)
     f1 = f1_score(all_labels, all_preds, average='weighted')
+    
+    if log_report:
+        logger.info(f"Classification Report:\n{classification_report(all_labels, all_preds, target_names=['DOWN', 'UP'])}")
+        logger.info(f"Confusion Matrix:\n{confusion_matrix(all_labels, all_preds)}")
+
     avg_loss = total_loss / len(all_labels)
     return avg_loss, accuracy, f1
 
@@ -216,6 +285,12 @@ def train_loop(cfg: Config, df: pd.DataFrame, feats: List[str], logger):
     val_df.loc[:, feats] = scaler.transform(val_df[feats])
     test_df.loc[:, feats] = scaler.transform(test_df[feats])
 
+    # --- Sanity Check: Label-Shuffle Test (for debugging data leakage) ---
+    # To run this test, uncomment the following line. If validation accuracy is still high
+    # (e.g., > 0.55) after 1 epoch, you likely have a data leak where the model can "cheat".
+    # train_df['target'] = np.random.permutation(train_df['target'].values)
+    # logger.warning("LABEL SHUFFLE TEST IS ACTIVE. Training will not be meaningful.")
+
     train_ds = SequenceDataset(train_df, feats, cfg.window)
     val_ds = SequenceDataset(val_df, feats, cfg.window)
     test_ds = SequenceDataset(test_df, feats, cfg.window)
@@ -233,8 +308,21 @@ def train_loop(cfg: Config, df: pd.DataFrame, feats: List[str], logger):
         logger.error("Training loader is empty! Cannot proceed with training.")
         return None, None, {}
 
+    # --- Handle Class Imbalance with Weighted Loss ---
+    # Calculate weights to penalize misclassification of the minority class more heavily.
+    class_counts = train_df['target'].value_counts().sort_index().values
+    if len(class_counts) == 2:
+        # weights = 1.0 / num_samples_in_class
+        weights = 1.0 / torch.tensor(class_counts, dtype=torch.float)
+        # Normalize weights
+        weights = weights / weights.sum()
+        class_weights = weights.to(device)
+        logger.info(f"Applying class weights to handle imbalance: {class_weights.cpu().numpy().tolist()}")
+    else:
+        class_weights = None
+
     model = LSTMClassifier(len(feats), cfg.hidden_size, cfg.num_layers, cfg.dropout, cfg.bidirectional).to(device)
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=cfg.label_smoothing)
     opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     # Add a learning rate scheduler to reduce LR when validation accuracy plateaus
     scheduler = ReduceLROnPlateau(opt, mode='max', factor=0.2, patience=3, verbose=True)
@@ -257,7 +345,7 @@ def train_loop(cfg: Config, df: pd.DataFrame, feats: List[str], logger):
             total_train_loss += loss.item()
         
         avg_train_loss = total_train_loss / len(train_loader)
-        val_loss, val_acc, val_f1 = evaluate_classification(model, val_loader, device)
+        val_loss, val_acc, val_f1 = evaluate_classification(model, val_loader, device, logger)
         logger.info(f"Epoch {epoch:03d} | train_loss={avg_train_loss:.4f} | val_loss={val_loss:.4f} | val_accuracy={val_acc:.4f} | val_f1={val_f1:.4f}")
 
         # The scheduler monitors the validation accuracy
@@ -273,7 +361,7 @@ def train_loop(cfg: Config, df: pd.DataFrame, feats: List[str], logger):
     if best_state:
         model.load_state_dict(best_state)
     
-    test_loss, test_acc, test_f1 = evaluate_classification(model, test_loader, device)
+    test_loss, test_acc, test_f1 = evaluate_classification(model, test_loader, device, logger, log_report=True)
     logger.info(f"Final Test Loss: {test_loss:.4f}")
     logger.info(f"Final Test Accuracy: {test_acc:.4f} | Final Test F1-Score: {test_f1:.4f}")
     return model, scaler, {"test_loss": test_loss, "test_accuracy": test_acc, "test_f1": test_f1}

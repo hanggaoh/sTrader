@@ -73,12 +73,14 @@ def main():
     # For easy debugging, use a more powerful default config
     cfg = Config(
         train_sample_fraction=0.2, # Use 20% of stocks
+        horizon=5,                 # Predict 5 days into the future to smooth out noise
         epochs=30,                 # Allow more epochs for the scheduler to work
         hidden_size=512,           # A larger model to capture more complex patterns
         num_layers=2,
         lr=5e-4,                   # A moderate starting learning rate
         batch_size=512,            # Increase batch size to stabilize training for the larger model
         early_stopping_patience=7, # A bit more patience for early stopping
+        label_smoothing=0.1,       # Use label smoothing to prevent overconfidence
         num_workers=4,             # Use worker processes to speed up data loading
     )
     # To use command-line arguments, comment the line above and uncomment the one below
