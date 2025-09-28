@@ -29,19 +29,49 @@ class TaskScheduler:
         self.storage = Storage(config=config)
 
     def _get_stock_list(self) -> List[Dict[str, str]]:
+        """
+        Fetches the list of stocks to process.
+        It first tries to get the list of unique symbols from the database.
+        If the database is empty, it falls back to the JSON file.
+        """
+        log.info("Determining stock list source...")
+        db_symbols = self.storage.get_all_distinct_symbols()
+
+        if db_symbols:
+            log.info(f"Using {len(db_symbols)} symbols from the database as the source of truth.")
+            # Using the symbol as a placeholder for the name, as the DB doesn't store it.
+            return [{'symbol': symbol, 'name': symbol} for symbol in db_symbols]
+        
+        log.warning("Database contains no stock symbols. Falling back to JSON file for initial list.")
         json_path = os.path.join(os.path.dirname(__file__), '../data/chinese_stocks.json')
         try:
             with open(json_path, 'r') as f:
-                stocks = json.load(f)
-                if not isinstance(stocks, list) or not all(isinstance(s, dict) and 'symbol' in s and 'name' in s for s in stocks):
-                    log.error(f"Stock file at {json_path} is not a valid JSON list of objects with 'symbol' and 'name' keys.")
-                    return []
-                return stocks
+                data = json.load(f)
+
+            if not isinstance(data, list) or not data:
+                log.error(f"Stock file at {json_path} is not a valid JSON list or is empty.")
+                return []
+
+            first_element = data[0]
+            if isinstance(first_element, str):
+                log.warning("Stock file is a list of strings. Using symbols as placeholder names.")
+                return [{'symbol': symbol, 'name': symbol} for symbol in data]
+            
+            elif isinstance(first_element, dict) and 'symbol' in first_element:
+                # If it's a list of dicts, ensure the 'name' key exists, defaulting to symbol if not.
+                log.info("Stock file is a list of objects. Using 'name' if available.")
+                return [{'symbol': s['symbol'], 'name': s.get('name', s['symbol'])} for s in data]
+            
+            else:
+                log.error(f"Stock file at {json_path} has an unknown or invalid format.")
+                return []
+
         except FileNotFoundError:
             log.error(f"Stock file not found at {json_path}")
+            return []
         except json.JSONDecodeError:
             log.error(f"Could not decode JSON from stock file at {json_path}.")
-        return []
+            return []
 
     def schedule_daily_tasks(self):
         stock_list = self._get_stock_list()
@@ -194,5 +224,6 @@ class TaskScheduler:
             log.info("Scheduler started.")
 
     def stop(self):
-        self.scheduler.shutdown()
+        if self.scheduler.running:
+            self.scheduler.shutdown()
         self.storage.close()

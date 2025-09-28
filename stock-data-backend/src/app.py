@@ -1,27 +1,45 @@
-from flask import Flask, jsonify, request
-from scheduler.task import TaskScheduler
+import logging
 import os
 import atexit
-import logging
+
+# --- Gunicorn Logger Integration ---
+# This block MUST run before any other application modules are imported.
+# This ensures that all loggers created by imported modules will inherit this configuration.
+if __name__ != "__main__":
+    # Get the Gunicorn logger instance
+    gunicorn_logger = logging.getLogger("gunicorn.error")
+
+    # Get the root logger and configure it to use Gunicorn's handlers and level.
+    root_logger = logging.getLogger()
+    root_logger.handlers = gunicorn_logger.handlers
+    root_logger.setLevel(logging.DEBUG)
+
+    # --- Silence noisy third-party loggers ---
+    logging.getLogger("yfinance").setLevel(logging.INFO)
+    logging.getLogger("tz_kv").setLevel(logging.WARNING)
+
+# --- Now, import the rest of the Flask application ---
+from flask import Flask, jsonify, request
+from scheduler.task import TaskScheduler
+
+# The logger in `scheduler.task` will now be created AFTER the root logger is configured.
 
 app = Flask(__name__)
 
-# --- Gunicorn Logger Integration ---
-# When running with Gunicorn, it provides its own logger.
-# We integrate with it to ensure all logs go to the correct output stream.
-if __name__ != "__main__":
-    gunicorn_logger = logging.getLogger("gunicorn.error")
-    app.logger.handlers = gunicorn_logger.handlers
-    app.logger.setLevel(gunicorn_logger.level)
-# --------------------------------
+# It's still a good practice to ensure the Flask app's logger level is aligned.
+app.logger.setLevel(logging.DEBUG)
 
-log = app.logger
+# Use a logger for this file. It will also inherit the root configuration.
+log = logging.getLogger(__name__)
 
-# Instantiate the scheduler once.
+# --- Scheduler Initialization ---
+log.info("Initializing and starting the scheduler...")
 scheduler = TaskScheduler()
-
-# Ensure the scheduler and its database connection are shut down gracefully on exit.
+scheduler.schedule_daily_tasks()
+scheduler.start()
 atexit.register(lambda: scheduler.stop())
+log.info("Scheduler started and daily tasks scheduled.")
+# --------------------------------
 
 # A simple route to confirm the web server is running.
 @app.route('/')
@@ -104,9 +122,7 @@ def trigger_fetch_single():
     }), 202
 
 if __name__ == "__main__":
-    # This block is for local development only (e.g., running `python src/app.py`)
-    # It will not be executed when running with Gunicorn in Docker.
+    # This block is for local development only.
+    # For local, we use basicConfig. The scheduler is already started above.
     logging.basicConfig(level=logging.INFO)
-    scheduler.schedule_daily_tasks()
-    scheduler.start()
     app.run(port=5000, debug=True)

@@ -62,6 +62,18 @@ class Storage:
 
         log.info("Schema setup complete.")
 
+    def get_all_distinct_symbols(self) -> list[str]:
+        """Fetches a list of all unique stock symbols from the database."""
+        log.info("Querying database for all distinct stock symbols...")
+        query = "SELECT DISTINCT stock_symbol FROM stock_data;"
+        with self.pool.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(query)
+                results = cursor.fetchall()
+                symbols = [row[0] for row in results]
+                log.info(f"Found {len(symbols)} distinct symbols in the database.")
+                return symbols
+
     def store_raw_news(self, articles: list):
         """Inserts raw news articles with a 'PENDING' status, ignoring duplicates."""
         if not articles:

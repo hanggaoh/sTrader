@@ -23,5 +23,5 @@ COPY . .
 # Set the final working directory to the src folder
 WORKDIR /app/src
 
-# Command to run the application with Gunicorn
-CMD ["gunicorn", "--bind", "0.0.0.0:8000", "app:app"]
+# Command to run the application with Gunicorn using a threaded worker
+CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--log-level", "debug", "--workers", "1", "--threads", "10", "app:app"]
