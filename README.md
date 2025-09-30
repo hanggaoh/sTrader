@@ -7,3 +7,27 @@
 ## Training, Validation, and BackTesting
 
 ## Evaluation Metrics
+
+
+# Project management
+
+1. Lock down data foundation
+    sentiment fetcher
+    unit tests for news correctly insert into database
+    news processing into sentiment per stock
+
+2. Minimal data pipeline
+    finbert pipeline -> process sentiment -> write score back to database
+    Fetch data from DB → preprocess → run model → store predictions back into DB.
+
+3. Backend portfolio tracking Glue
+    portfolio table
+    manager that provides BUY and sell signal
+
+4. Testing framework
+    data ingestion
+    model loop
+    portfolio tracking
+    CICD script
+
+5. Improve model performance

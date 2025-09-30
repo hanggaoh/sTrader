@@ -1,15 +1,9 @@
 import argparse
-import os
-import sys
 
 import time
 import requests
 import json
 import pandas as pd
-
-# Add the project's 'src' directory to the Python path to allow for module imports
-# like 'config' and 'data.storage'.
-sys.path.append(os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from config import config
 from data.storage import Storage
