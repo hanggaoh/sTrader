@@ -39,13 +39,14 @@ class Storage:
 
         create_sentiment_table_query = """
         CREATE TABLE IF NOT EXISTS news_sentiment (
-            id BIGSERIAL PRIMARY KEY,
+            id BIGSERIAL,
             published_at TIMESTAMPTZ NOT NULL,
             stock_symbol VARCHAR(20) NOT NULL,
-            headline TEXT UNIQUE, -- Ensure headlines are unique to avoid duplicates
+            headline TEXT,
             source_url TEXT,
-            sentiment_score DOUBLE PRECISION DEFAULT NULL, -- Store the raw score
-            status VARCHAR(20) DEFAULT 'PENDING' -- PENDING, PROCESSED, FAILED
+            sentiment_score DOUBLE PRECISION DEFAULT NULL,
+            status VARCHAR(20) DEFAULT 'PENDING',
+            CONSTRAINT news_sentiment_pk PRIMARY KEY (published_at, stock_symbol, id)
         );
         """
         create_sentiment_hypertable_query = "SELECT create_hypertable('news_sentiment', 'published_at', if_not_exists => TRUE);"

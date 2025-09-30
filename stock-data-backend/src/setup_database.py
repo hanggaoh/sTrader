@@ -1,4 +1,4 @@
-import os
+
 from data.storage import Storage
 from config import config
 
