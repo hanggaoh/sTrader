@@ -8,6 +8,7 @@ import pandas as pd
 from config import config
 from data.storage import Storage
 
+API_URL="http://127.0.0.1:8000"
 
 def query_stock_summary(storage: Storage):
     """
@@ -44,7 +45,7 @@ def query_stock_summary(storage: Storage):
 
 
 def trigger_single_stock_fix(symbol: str, days_to_fetch: int) -> bool:
-    api_url = "http://127.0.0.1:5000/trigger-fetch-single"  # use 127.0.0.1
+    api_url = f"{API_URL}/trigger-fetch-single"  # use 127.0.0.1
     payload = {"symbol": symbol, "days": days_to_fetch}
 
     print(f"  Triggering API to fetch last {days_to_fetch} days...")
@@ -148,7 +149,7 @@ def check_missing_data_per_stock(storage: Storage, days_to_check: int, auto_fix:
                 # triggering rate limits on the underlying data provider (yfinance).
                 time.sleep(1)
             else:
-                api_url = "http://localhost:5000/trigger-fetch-single"
+                api_url = f"{API_URL}/trigger-fetch-single"
                 payload = {"symbol": symbol, "days": days_to_fetch}
                 print(f"  -> To fix, run: curl -X PUT -H 'Content-Type: application/json' -d '{json.dumps(payload)}' {api_url}")
 
