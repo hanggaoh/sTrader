@@ -3,7 +3,7 @@ import pandas as pd
 from unittest.mock import MagicMock
 
 # Imports should be relative to the project root (/app), which is in the PYTHONPATH.
-from src.data.fetcher import StockDataFetcher
+from data.fetcher import StockDataFetcher
 
 # Define mock data that simulates the yfinance response for the history call.
 MOCK_HISTORICAL_DATA = pd.DataFrame(

@@ -3,7 +3,8 @@ from __future__ import annotations
 import argparse
 import logging
 
-from ml.utils import run_training, Config
+from ml.config import Config
+from ml.utils import run_training
 
 def parse_args() -> Config:
     p = argparse.ArgumentParser()

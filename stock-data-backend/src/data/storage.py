@@ -5,7 +5,7 @@ import pandas as pd
 import psycopg
 from psycopg_pool import ConnectionPool
 
-from config import Config
+from src.config import Config
 
 log = logging.getLogger(__name__)
 
@@ -20,7 +20,8 @@ class Storage:
             f"password={config.db_password} host={config.db_host} port={config.db_port}"
         )
         try:
-            self.pool = ConnectionPool(conninfo, min_size=1, max_size=5)
+            # Explicitly set open=True to prepare for future library updates and silence the warning.
+            self.pool = ConnectionPool(conninfo, min_size=1, max_size=5, open=True)
         except psycopg.OperationalError as e:
             log.error(f"Could not connect to the database. Please check connection settings.", exc_info=True)
             raise e
@@ -50,6 +51,24 @@ class Storage:
         );
         """
         create_sentiment_hypertable_query = "SELECT create_hypertable('news_sentiment', 'published_at', if_not_exists => TRUE);"
+
+        # New table for storing calculated features
+        create_features_table_query = """
+        CREATE TABLE IF NOT EXISTS stock_features (
+            time TIMESTAMPTZ NOT NULL,
+            stock_symbol VARCHAR(20) NOT NULL,
+            sentiment DOUBLE PRECISION,
+            sma_5 DOUBLE PRECISION, sma_10 DOUBLE PRECISION, sma_20 DOUBLE PRECISION, sma_50 DOUBLE PRECISION,
+            ema_20 DOUBLE PRECISION, macd DOUBLE PRECISION, macd_signal DOUBLE PRECISION, macd_hist DOUBLE PRECISION,
+            adx DOUBLE PRECISION, rsi DOUBLE PRECISION,
+            return_1d DOUBLE PRECISION, return_5d DOUBLE PRECISION, return_21d DOUBLE PRECISION,
+            volatility_21d DOUBLE PRECISION, atr DOUBLE PRECISION,
+            skew_21d DOUBLE PRECISION, kurt_21d DOUBLE PRECISION,
+            target INTEGER,
+            PRIMARY KEY (time, stock_symbol)
+        );
+        """
+        create_features_hypertable_query = "SELECT create_hypertable('stock_features', 'time', if_not_exists => TRUE);"
         
         with self.pool.connection() as conn:
             with conn.cursor() as cursor:
@@ -60,6 +79,10 @@ class Storage:
                 log.info("Creating and configuring 'news_sentiment' table...")
                 cursor.execute(create_sentiment_table_query)
                 cursor.execute(create_sentiment_hypertable_query)
+
+                log.info("Creating and configuring 'stock_features' table...")
+                cursor.execute(create_features_table_query)
+                cursor.execute(create_features_hypertable_query)
 
         log.info("Schema setup complete.")
 
@@ -128,6 +151,45 @@ class Storage:
                     ON CONFLICT (time, stock_symbol) DO UPDATE SET
                         open = EXCLUDED.open, high = EXCLUDED.high, low = EXCLUDED.low,
                         close = EXCLUDED.close, volume = EXCLUDED.volume;
+                """)
+
+    def store_features(self, features_df: pd.DataFrame):
+        """Bulk-inserts or updates features into the stock_features table."""
+        if features_df.empty:
+            return
+
+        # Ensure the DataFrame has the correct columns in the correct order
+        cols = [
+            'time', 'stock_symbol', 'sentiment', 'sma_5', 'sma_10', 'sma_20', 'sma_50', 'ema_20', 
+            'macd', 'macd_signal', 'macd_hist', 'adx', 'rsi', 'return_1d', 'return_5d', 'return_21d', 
+            'volatility_21d', 'atr', 'skew_21d', 'kurt_21d', 'target'
+        ]
+        # The incoming df has 'timestamp' and 'symbol'. Rename them.
+        df_to_copy = features_df.rename(columns={"timestamp": "time", "symbol": "stock_symbol"})
+        df_to_copy = df_to_copy[cols]
+
+        buffer = io.StringIO()
+        df_to_copy.to_csv(buffer, index=False, header=False)
+        buffer.seek(0)
+
+        with self.pool.connection() as conn:
+            with conn.cursor() as cursor:
+                # Use a temporary table for efficient bulk upsert
+                cursor.execute("CREATE TEMP TABLE temp_features (LIKE stock_features) ON COMMIT DROP;")
+                with cursor.copy(f"COPY temp_features ({','.join(cols)}) FROM STDIN WITH (FORMAT CSV)") as copy:
+                    copy.write(buffer.read())
+                
+                # Use ON CONFLICT to either INSERT new rows or UPDATE existing ones
+                cursor.execute("""
+                    INSERT INTO stock_features SELECT * FROM temp_features
+                    ON CONFLICT (time, stock_symbol) DO UPDATE SET
+                        sentiment = EXCLUDED.sentiment, sma_5 = EXCLUDED.sma_5, sma_10 = EXCLUDED.sma_10, 
+                        sma_20 = EXCLUDED.sma_20, sma_50 = EXCLUDED.sma_50, ema_20 = EXCLUDED.ema_20, 
+                        macd = EXCLUDED.macd, macd_signal = EXCLUDED.macd_signal, macd_hist = EXCLUDED.macd_hist, 
+                        adx = EXCLUDED.adx, rsi = EXCLUDED.rsi, return_1d = EXCLUDED.return_1d, 
+                        return_5d = EXCLUDED.return_5d, return_21d = EXCLUDED.return_21d, 
+                        volatility_21d = EXCLUDED.volatility_21d, atr = EXCLUDED.atr, 
+                        skew_21d = EXCLUDED.skew_21d, kurt_21d = EXCLUDED.kurt_21d, target = EXCLUDED.target;
                 """)
 
     def symbol_exists(self, stock_symbol: str) -> bool:
