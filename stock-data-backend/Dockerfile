@@ -39,6 +39,9 @@ CMD ["python", "-m", "pytest"]
 # This is the final, lean image that will be used in production.
 FROM base AS final
 
+# Install postgresql-client to get access to pg_dump for backups
+RUN apt-get update && apt-get install -y --no-install-recommends postgresql-client && rm -rf /var/lib/apt/lists/*
+
 # Copy the application code from the test stage to ensure we deploy what was tested.
 COPY --from=test /app /app
 

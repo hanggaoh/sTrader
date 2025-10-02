@@ -6,7 +6,8 @@ from typing import List, Tuple
 import numpy as np
 import pandas as pd
 
-from ml.config import Config
+from src.data.storage import Storage
+from src.ml.config import Config
 
 log = logging.getLogger(__name__)
 
@@ -103,3 +104,44 @@ def build_features(df: pd.DataFrame, cfg: Config) -> Tuple[pd.DataFrame, List[st
     df = df.dropna(subset=feats + ["target"]).copy()
     log.info(f"Finished building features. Final dataset shape: {df.shape}")
     return df, feats
+
+def calculate_and_store_features(storage: Storage, start_date: str, end_date: str):
+    """
+    Fetches raw data for a date range, calculates features, and stores them in the database.
+    """
+    log.info(f"Starting feature calculation for {start_date} to {end_date}.")
+    
+    # 1. Fetch raw data from the database
+    with storage.pool.connection() as conn:
+        sql = """
+            SELECT time, stock_symbol, open, high, low, close, volume 
+            FROM stock_data 
+            WHERE time BETWEEN %s AND %s
+        """
+        raw_df = pd.read_sql(sql, conn, params=[start_date, end_date])
+
+    if raw_df.empty:
+        log.warning("No raw data found for the specified date range. Aborting.")
+        return
+
+    # 2. Prepare the DataFrame for feature building
+    raw_df = raw_df.rename(columns={"stock_symbol": "symbol", "time": "timestamp"})
+    raw_df["timestamp"] = pd.to_datetime(raw_df["timestamp"], utc=True)
+    
+    # build_features expects a sentiment column. We'll join it in the future,
+    # but for now, we'll use a placeholder.
+    raw_df['sentiment'] = 0.0
+
+    # 3. Build features
+    # We can use a default config for the feature calculation.
+    cfg = Config(horizon=1)
+    features_df, _ = build_features(raw_df, cfg)
+
+    if features_df.empty:
+        log.warning("Feature calculation resulted in an empty DataFrame. Nothing to store.")
+        return
+
+    # 4. Store the new features in the database
+    log.info(f"Storing {len(features_df)} rows of calculated features...")
+    storage.store_features(features_df)
+    log.info("Feature calculation and storage complete.")

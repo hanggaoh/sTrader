@@ -5,7 +5,7 @@ import pandas as pd
 import psycopg
 from psycopg_pool import ConnectionPool
 
-from src.config import Config
+from config import Config
 
 log = logging.getLogger(__name__)
 

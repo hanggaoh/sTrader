@@ -2,9 +2,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.data.storage import Storage
-from src.ml.config import Config
-from src.ml.preprocessor import build_features
+from data.storage import Storage
+from ml.config import Config
+from ml.preprocessor import build_features
 
 
 # Ignore the UserWarning from pandas when using a raw DBAPI2 connection.

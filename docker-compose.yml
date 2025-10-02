@@ -20,7 +20,7 @@ services:
   backend:
     build:
       context: ./stock-data-backend
-      target: final # Explicitly target the final stage for the production backend
+      target: final
     restart: always
     depends_on:
       db:
@@ -43,18 +43,16 @@ services:
   backend-test:
     build:
       context: ./stock-data-backend
-      target: test # Target the test stage in the Dockerfile
+      target: test
     depends_on:
       db:
         condition: service_healthy
-    # The DB connection details are still needed for the test to run.
     environment:
       - DB_HOST=db
-      - DB_NAME=strader_db
+      - DB_NAME=strader_test_db # Use a separate database for testing
       - DB_USER=strader_user
       - DB_PASSWORD=my-secret-pw
       - DB_PORT=5432
-    # The command to run the test suite.
     command: ["python", "-m", "pytest"]
 
 volumes:

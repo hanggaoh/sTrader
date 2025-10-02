@@ -16,6 +16,7 @@ torch
 scikit-learn
 sqlalchemy
 gunicorn
+pydantic
 
 # New dependencies for sentiment analysis
 requests

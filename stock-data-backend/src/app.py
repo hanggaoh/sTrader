@@ -1,35 +1,41 @@
 import logging
 import atexit
+import threading
+from datetime import date
+
+from pydantic import BaseModel, validator
 
 # --- Gunicorn Logger Integration ---
-# This block MUST run before any other application modules are imported.
-# This ensures that all loggers created by imported modules will inherit this configuration.
 if __name__ != "__main__":
-    # Get the Gunicorn logger instance
     gunicorn_logger = logging.getLogger("gunicorn.error")
-
-    # Get the root logger and configure it to use Gunicorn's handlers and level.
     root_logger = logging.getLogger()
     root_logger.handlers = gunicorn_logger.handlers
     root_logger.setLevel(logging.DEBUG)
-
-    # --- Silence noisy third-party loggers ---
     logging.getLogger("yfinance").setLevel(logging.INFO)
     logging.getLogger("tz_kv").setLevel(logging.WARNING)
 
-# --- Now, import the rest of the Flask application ---
+# --- Now, import the rest of the application ---
 from flask import Flask, jsonify, request
+
+from config import Config
+from data.storage import Storage
+from ml.preprocessor import calculate_and_store_features
 from scheduler.task import TaskScheduler
 
-# The logger in `scheduler.task` will now be created AFTER the root logger is configured.
-
 app = Flask(__name__)
-
-# It's still a good practice to ensure the Flask app's logger level is aligned.
 app.logger.setLevel(logging.DEBUG)
-
-# Use a logger for this file. It will also inherit the root configuration.
 log = logging.getLogger(__name__)
+
+# --- Pydantic model for request validation ---
+class BackfillRequest(BaseModel):
+    start_date: date
+    end_date: date
+
+    @validator('end_date')
+    def end_date_must_be_after_start_date(cls, v, values):
+        if 'start_date' in values and v < values['start_date']:
+            raise ValueError('end_date must be on or after start_date')
+        return v
 
 # --- Scheduler Initialization ---
 log.info("Initializing and starting the scheduler...")
@@ -40,22 +46,59 @@ atexit.register(lambda: scheduler.stop())
 log.info("Scheduler started and daily tasks scheduled.")
 # --------------------------------
 
-# A simple route to confirm the web server is running.
+# --- API Endpoints ---
+
 @app.route('/')
 def index():
     return "Stock data scheduler is running."
 
 @app.route('/health')
 def health_check():
-    """A simple health check endpoint that returns a 200 OK status."""
     return jsonify({"status": "healthy"}), 200
+
+@app.route('/features/backfill', methods=['POST'])
+def backfill_features():
+    """
+    Triggers a background task to calculate and store features for a given date range.
+    """
+    log.info("Feature backfill endpoint triggered.")
+    
+    # --- Request Validation ---
+    if not request.is_json:
+        return jsonify({"error": "Request must be JSON"}), 400
+    try:
+        data = BackfillRequest(**request.get_json())
+    except Exception as e:
+        return jsonify({"error": "Invalid request body", "details": str(e)}), 400
+
+    # --- Background Task Logic ---
+    def worker(start, end):
+        """The function that will run in the background thread."""
+        log.info(f"Background worker started for feature backfill: {start} to {end}.")
+        storage = None
+        try:
+            # Create a new Storage instance for this thread.
+            app_config = Config()
+            storage = Storage(config=app_config)
+            calculate_and_store_features(storage, start.isoformat(), end.isoformat())
+        except Exception as e:
+            log.error(f"Error in feature backfill worker: {e}", exc_info=True)
+        finally:
+            if storage:
+                storage.close()
+            log.info(f"Background worker finished for feature backfill: {start} to {end}.")
+
+    # --- Start the thread and return immediately ---
+    thread = threading.Thread(target=worker, args=(data.start_date, data.end_date))
+    thread.start()
+
+    return jsonify({
+        "message": f"Successfully started feature backfill from {data.start_date} to {data.end_date}. Check logs for progress."
+    }), 202
+
 
 @app.route('/trigger-backfill', methods=['PUT'])
 def trigger_backfill():
-    """
-    Triggers a one-time background task to fetch and store the full
-    historical data for all stocks in the JSON file.
-    """
     log.info("Backfill endpoint triggered.")
     count = scheduler.schedule_backfill_tasks()
     return jsonify({
@@ -64,13 +107,7 @@ def trigger_backfill():
 
 @app.route('/trigger-daily-fetch', methods=['PUT'])
 def trigger_daily_fetch():
-    """
-    Triggers a one-time background task to fetch and store recent
-    historical data for all stocks.
-    Accepts an optional 'days' parameter in the JSON body.
-    """
     log.info("Daily fetch endpoint triggered.")
-    
     days = 5
     try:
         data = request.get_json(silent=True)
@@ -78,8 +115,6 @@ def trigger_daily_fetch():
             parsed_days = int(data['days'])
             if parsed_days > 0:
                 days = parsed_days
-            else:
-                log.warning(f"Received non-positive 'days' value ({data['days']}), using default {days}.")
     except (ValueError, TypeError):
         log.warning(f"Received invalid 'days' value, using default {days}.")
 
@@ -90,13 +125,7 @@ def trigger_daily_fetch():
 
 @app.route('/trigger-fetch-single', methods=['PUT'])
 def trigger_fetch_single():
-    """
-    Triggers a one-time background task to fetch and store recent
-    historical data for a single stock.
-    Accepts 'symbol' and 'days' in the JSON body.
-    """
     log.info("Single stock fetch endpoint triggered.")
-
     if not request.is_json:
         return jsonify({"error": "Request must be JSON"}), 400
 
@@ -121,7 +150,5 @@ def trigger_fetch_single():
     }), 202
 
 if __name__ == "__main__":
-    # This block is for local development only.
-    # For local, we use basicConfig. The scheduler is already started above.
     logging.basicConfig(level=logging.INFO)
     app.run(port=5000, debug=True)
