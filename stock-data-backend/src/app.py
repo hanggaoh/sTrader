@@ -1,5 +1,5 @@
-import logging
 import atexit
+import logging
 import threading
 from datetime import date
 

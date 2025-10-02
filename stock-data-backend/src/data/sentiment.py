@@ -3,7 +3,9 @@ import logging
 from typing import List, Dict, Optional
 
 import requests
-from transformers import pipeline, AutoTokenizer, AutoModelForSequenceClassification
+from transformers.pipelines import pipeline
+
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
 log = logging.getLogger(__name__)
 

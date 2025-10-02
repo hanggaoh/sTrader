@@ -6,8 +6,8 @@ from typing import List, Tuple
 import numpy as np
 import pandas as pd
 
-from src.data.storage import Storage
-from src.ml.config import Config
+from data.storage import Storage
+from ml.config import Config
 
 log = logging.getLogger(__name__)
 
