@@ -69,7 +69,13 @@ def build_features(df: pd.DataFrame, cfg: Config) -> Tuple[pd.DataFrame, List[st
 
     # --- Target Variable (Classification) ---
     # Target is 1 if the price goes up in the next `horizon` periods, 0 otherwise.
-    df["target"] = (df.groupby('symbol')['close'].shift(-cfg.horizon) > df['close']).astype(int)
+    # We must handle the NaN from the shift at the end of the series explicitly.
+    next_close = df.groupby('symbol')['close'].shift(-cfg.horizon)
+    df['target'] = (next_close > df['close'])
+    # Where the next close is not available, the target is undefined (NaN).
+    df.loc[next_close.isna(), 'target'] = np.nan
+    # Use a nullable integer type to preserve NaNs.
+    df['target'] = df['target'].astype(pd.Int64Dtype())
     
     # --- Diagnostic Logging: Target Distribution ---
     # Check if the target variable is imbalanced. If it's all 0s or 1s, the model can't learn.
@@ -105,7 +111,7 @@ def build_features(df: pd.DataFrame, cfg: Config) -> Tuple[pd.DataFrame, List[st
     log.info(f"Finished building features. Final dataset shape: {df.shape}")
     return df, feats
 
-def calculate_and_store_features(storage: Storage, start_date: str, end_date: str):
+def calculate_and_store_features(storage: Storage, start_date: str, end_date: str, symbol: str = None):
     """
     Fetches raw data for a date range, calculates features, and stores them in the database.
     """
@@ -118,7 +124,15 @@ def calculate_and_store_features(storage: Storage, start_date: str, end_date: st
             FROM stock_data 
             WHERE time BETWEEN %s AND %s
         """
-        raw_df = pd.read_sql(sql, conn, params=[start_date, end_date])
+        params = [start_date, end_date]
+        if symbol:
+            sql += " AND stock_symbol = %s"
+            params.append(symbol)
+
+        # Add the ORDER BY clause at the end
+        sql += " ORDER BY time ASC"
+
+        raw_df = pd.read_sql(sql, conn, params=params)
 
     if raw_df.empty:
         log.warning("No raw data found for the specified date range. Aborting.")

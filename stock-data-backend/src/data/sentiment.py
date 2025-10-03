@@ -3,9 +3,8 @@ import logging
 from typing import List, Dict, Optional
 
 import requests
-from transformers.pipelines import pipeline
-
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
+from transformers.pipelines import pipeline
 
 log = logging.getLogger(__name__)
 
@@ -15,7 +14,7 @@ NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 # --- Hugging Face Model Loading ---
 # We load the model and tokenizer only once when the module is first imported.
 # This is a time-consuming operation, so we want to avoid doing it repeatedly.
-SENTIMENT_MODEL_NAME = "yiyang-zhang/finbert-pretrain-chinese"
+SENTIMENT_MODEL_NAME = "uer/chinese_roberta_L-2_H-512"
 try:
     log.info(f"Loading sentiment model: {SENTIMENT_MODEL_NAME}...")
     tokenizer = AutoTokenizer.from_pretrained(SENTIMENT_MODEL_NAME)

@@ -1,9 +1,10 @@
-import atexit
 import logging
+import atexit
 import threading
 from datetime import date
+from concurrent.futures import ThreadPoolExecutor
 
-from pydantic import BaseModel, validator
+from pydantic import BaseModel, field_validator
 
 # --- Gunicorn Logger Integration ---
 if __name__ != "__main__":
@@ -31,9 +32,9 @@ class BackfillRequest(BaseModel):
     start_date: date
     end_date: date
 
-    @validator('end_date')
-    def end_date_must_be_after_start_date(cls, v, values):
-        if 'start_date' in values and v < values['start_date']:
+    @field_validator('end_date')
+    def end_date_must_be_after_start_date(cls, v, info):
+        if 'start_date' in info.data and v < info.data['start_date']:
             raise ValueError('end_date must be on or after start_date')
         return v
 
@@ -94,6 +95,75 @@ def backfill_features():
 
     return jsonify({
         "message": f"Successfully started feature backfill from {data.start_date} to {data.end_date}. Check logs for progress."
+    }), 202
+
+
+def _backfill_one_symbol(symbol: str):
+    """
+    Helper function to backfill features for a single stock.
+    This function is designed to be run in a separate thread.
+    """
+    log.info(f"Starting feature backfill for symbol: {symbol}")
+    storage = None
+    try:
+        # Each thread must have its own Storage instance and its own Config.
+        app_config = Config()
+        storage = Storage(config=app_config)
+        
+        # Define a very wide date range to ensure all data is captured.
+        start_date = "1970-01-01"
+        end_date = date.today().isoformat()
+        
+        calculate_and_store_features(storage, start_date, end_date, symbol=symbol)
+        log.info(f"Finished feature backfill for symbol: {symbol}")
+        return True, symbol
+    except Exception as e:
+        log.error(f"Error backfilling features for {symbol}: {e}", exc_info=True)
+        return False, symbol
+    finally:
+        if storage:
+            storage.close()
+
+@app.route('/features/full-backfill', methods=['POST'])
+def full_backfill_features():
+    """
+    Triggers a full feature backfill for all stocks in parallel.
+    """
+    log.info("Parallel full feature backfill endpoint triggered.")
+
+    def worker():
+        log.info("Background worker started for parallel full feature backfill.")
+        main_storage = None
+        try:
+            app_config = Config()
+            main_storage = Storage(config=app_config)
+            symbols = main_storage.get_all_distinct_symbols()
+            log.info(f"Found {len(symbols)} symbols to backfill in parallel.")
+
+            # Use a ThreadPoolExecutor to run backfills in parallel.
+            # The number of workers can be tuned based on CPU and DB capacity.
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                results = list(executor.map(_backfill_one_symbol, symbols))
+            
+            successful_jobs = sum(1 for r in results if r[0])
+            failed_symbols = [s for success, s in results if not success]
+
+            log.info(f"Parallel backfill finished. Success: {successful_jobs}/{len(symbols)}.")
+            if failed_symbols:
+                log.warning(f"The following symbols failed to backfill: {failed_symbols}")
+
+        except Exception as e:
+            log.error(f"Error in parallel full feature backfill worker: {e}", exc_info=True)
+        finally:
+            if main_storage:
+                main_storage.close()
+            log.info("Parallel full feature backfill worker finished.")
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+
+    return jsonify({
+        "message": "Successfully started parallel full feature backfill for all stocks. Check logs for progress."
     }), 202
 
 

@@ -38,6 +38,9 @@ class TaskScheduler:
             return [{'symbol': symbol, 'name': symbol} for symbol in db_symbols]
         
         log.warning("Database contains no stock symbols. Falling back to JSON file for initial list.")
+        return self._get_stock_list_from_json()
+
+    def _get_stock_list_from_json(self) -> List[Dict[str, str]]:
         json_path = os.path.join(os.path.dirname(__file__), '../data/chinese_stocks.json')
         try:
             with open(json_path, 'r') as f:
@@ -140,7 +143,7 @@ class TaskScheduler:
         self.scheduler.add_job(self._fetch_and_store_price, args=[symbol, period_str, "single-fetch"], id=job_id, replace_existing=False, executor='repair_executor')
 
     def schedule_backfill_tasks(self):
-        stock_list = self._get_stock_list()
+        stock_list = self._get_stock_list_from_json()
         if not stock_list:
             return 0
         self.scheduler.add_job(self._run_full_backfill_loop, args=[stock_list], id="master_backfill_job", replace_existing=True, executor='backfill_executor')

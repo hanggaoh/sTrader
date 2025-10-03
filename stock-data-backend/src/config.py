@@ -26,6 +26,7 @@ class Config:
         self.db_password = os.getenv("DB_PASSWORD")
         self.db_host = os.getenv("DB_HOST", "localhost")
         self.db_port = int(os.getenv("DB_PORT", 5432))
+        self.news_api_key = os.getenv("NEWS_API_KEY", None)
 
         
         if not all([self.db_name, self.db_user, self.db_password]):
