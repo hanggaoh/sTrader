@@ -30,10 +30,11 @@ TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 BACKUP_FILE="$BACKUP_DIR/backup-$TIMESTAMP.dump"
 
 # 3. Execute pg_dump inside the running container.
+#    The --verbose flag is added to show progress during the dump.
 #    The output is piped directly to the backup file.
 #    With `set -o pipefail`, if pg_dump fails, the script will exit immediately.
 echo "Dumping database '$DB_NAME' to $BACKUP_FILE..."
-docker compose exec -T "$DB_SERVICE" pg_dump -U "$DB_USER" -d "$DB_NAME" -F c > "$BACKUP_FILE"
+docker compose exec -T "$DB_SERVICE" pg_dump --verbose -U "$DB_USER" -d "$DB_NAME" -F c > "$BACKUP_FILE"
 
 echo "Database dump successful."
 
