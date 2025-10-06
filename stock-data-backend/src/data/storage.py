@@ -20,7 +20,6 @@ class Storage:
             f"password={config.db_password} host={config.db_host} port={config.db_port}"
         )
         try:
-            # Explicitly set open=True to prepare for future library updates and silence the warning.
             self.pool = ConnectionPool(conninfo, min_size=1, max_size=5, open=True)
         except psycopg.OperationalError as e:
             log.error(f"Could not connect to the database. Please check connection settings.", exc_info=True)
@@ -45,14 +44,15 @@ class Storage:
             stock_symbol VARCHAR(20) NOT NULL,
             headline TEXT,
             source_url TEXT,
+            content TEXT,
             sentiment_score DOUBLE PRECISION DEFAULT NULL,
             status VARCHAR(20) DEFAULT 'PENDING',
-            CONSTRAINT news_sentiment_pk PRIMARY KEY (published_at, stock_symbol, id)
+            CONSTRAINT news_sentiment_pk PRIMARY KEY (published_at, stock_symbol, id),
+            UNIQUE (published_at, stock_symbol, headline)
         );
         """
         create_sentiment_hypertable_query = "SELECT create_hypertable('news_sentiment', 'published_at', if_not_exists => TRUE);"
 
-        # New table for storing calculated features
         create_features_table_query = """
         CREATE TABLE IF NOT EXISTS stock_features (
             time TIMESTAMPTZ NOT NULL,
@@ -98,15 +98,55 @@ class Storage:
                 log.info(f"Found {len(symbols)} distinct symbols in the database.")
                 return symbols
 
+    def get_stock_data_date_ranges(self) -> list[tuple]:
+        """Fetches the min and max date for each symbol in the stock_data table."""
+        log.info("Querying database for stock data date ranges...")
+        query = "SELECT stock_symbol, MIN(time)::date, MAX(time)::date FROM stock_data GROUP BY stock_symbol;"
+        with self.pool.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(query)
+                results = cursor.fetchall()
+                log.info(f"Found {len(results)} symbols with date ranges.")
+                return results
+
+    def get_news_summary_by_symbol(self) -> list[tuple]:
+        """
+        Fetches a summary of news data, grouped by stock symbol, including count and date range.
+
+        Returns:
+            A list of tuples, where each tuple contains:
+            (stock_symbol, news_count, min_date, max_date)
+        """
+        log.info("Querying database for news summary by symbol...")
+        query = """
+            SELECT
+                stock_symbol,
+                COUNT(*) AS news_count,
+                MIN(published_at)::date AS min_date,
+                MAX(published_at)::date AS max_date
+            FROM
+                news_sentiment
+            GROUP BY
+                stock_symbol
+            ORDER BY
+                news_count DESC;
+        """
+        with self.pool.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(query)
+                return cursor.fetchall()
+
     def store_raw_news(self, articles: list):
-        """Inserts raw news articles with a 'PENDING' status, ignoring duplicates."""
+        """Inserts or updates raw news articles, ignoring duplicates based on a composite key."""
         if not articles:
             return 0
         
         sql = """
-            INSERT INTO news_sentiment (published_at, stock_symbol, headline, source_url)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT (headline) DO NOTHING;
+            INSERT INTO news_sentiment (published_at, stock_symbol, headline, source_url, content)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (published_at, stock_symbol, headline) DO UPDATE SET
+                source_url = COALESCE(EXCLUDED.source_url, news_sentiment.source_url),
+                content = COALESCE(EXCLUDED.content, news_sentiment.content);
         """
         with self.pool.connection() as conn:
             with conn.cursor() as cursor:
@@ -158,13 +198,11 @@ class Storage:
         if features_df.empty:
             return
 
-        # Ensure the DataFrame has the correct columns in the correct order
         cols = [
             'time', 'stock_symbol', 'sentiment', 'sma_5', 'sma_10', 'sma_20', 'sma_50', 'ema_20', 
             'macd', 'macd_signal', 'macd_hist', 'adx', 'rsi', 'return_1d', 'return_5d', 'return_21d', 
             'volatility_21d', 'atr', 'skew_21d', 'kurt_21d', 'target'
         ]
-        # The incoming df has 'timestamp' and 'symbol'. Rename them.
         df_to_copy = features_df.rename(columns={"timestamp": "time", "symbol": "stock_symbol"})
         df_to_copy = df_to_copy[cols]
 
@@ -174,12 +212,10 @@ class Storage:
 
         with self.pool.connection() as conn:
             with conn.cursor() as cursor:
-                # Use a temporary table for efficient bulk upsert
                 cursor.execute("CREATE TEMP TABLE temp_features (LIKE stock_features) ON COMMIT DROP;")
                 with cursor.copy(f"COPY temp_features ({','.join(cols)}) FROM STDIN WITH (FORMAT CSV)") as copy:
                     copy.write(buffer.read())
                 
-                # Use ON CONFLICT to either INSERT new rows or UPDATE existing ones
                 cursor.execute("""
                     INSERT INTO stock_features SELECT * FROM temp_features
                     ON CONFLICT (time, stock_symbol) DO UPDATE SET
@@ -198,6 +234,35 @@ class Storage:
             with conn.cursor() as cursor:
                 cursor.execute(query, (stock_symbol,))
                 return cursor.fetchone() is not None
+
+    def has_news_for_symbol(self, stock_symbol: str) -> bool:
+        """Checks if any news articles exist for a given stock symbol."""
+        query = "SELECT 1 FROM news_sentiment WHERE stock_symbol = %s LIMIT 1;"
+        with self.pool.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(query, (stock_symbol,))
+                return cursor.fetchone() is not None
+
+    def query_features_for_symbols(self, stock_symbols: list[str]) -> pd.DataFrame:
+        """
+        Queries the database for all features for a given list of stock symbols.
+        """
+        if not stock_symbols:
+            return pd.DataFrame()
+
+        log.info(f"Querying features for {len(stock_symbols)} symbols...")
+        query = "SELECT * FROM stock_features WHERE stock_symbol = ANY(%s);"
+        
+        with self.pool.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(query, (stock_symbols,))
+                
+                column_names = [desc[0] for desc in cursor.description]
+                data = cursor.fetchall()
+                df = pd.DataFrame(data, columns=column_names)
+                
+                log.info(f"Retrieved {len(df)} feature rows for {len(stock_symbols)} symbols.")
+                return df
 
     def close(self):
         if self.pool:

@@ -21,3 +21,4 @@ pydantic
 # New dependencies for sentiment analysis
 requests
 transformers
+akshare

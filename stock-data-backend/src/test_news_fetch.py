@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 # Add the src directory to the Python path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from data.sentiment import fetch_news_for_symbol
+from data.news_api import fetch_news_for_symbol
 from config import config
 def test_fetch_news():
     """

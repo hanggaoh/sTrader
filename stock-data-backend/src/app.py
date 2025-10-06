@@ -1,10 +1,6 @@
 import logging
 import atexit
-import threading
 from datetime import date
-from concurrent.futures import ThreadPoolExecutor
-
-from pydantic import BaseModel, field_validator
 
 # --- Gunicorn Logger Integration ---
 if __name__ != "__main__":
@@ -16,27 +12,20 @@ if __name__ != "__main__":
     logging.getLogger("tz_kv").setLevel(logging.WARNING)
 
 # --- Now, import the rest of the application ---
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, Blueprint
 
-from config import Config
-from data.storage import Storage
-from ml.preprocessor import calculate_and_store_features
 from scheduler.task import TaskScheduler
+from routes.features import features_bp
+from data.storage import Storage
+from data.sentiment import bulk_analyze_sentiment
+from config import Config
 
 app = Flask(__name__)
 app.logger.setLevel(logging.DEBUG)
 log = logging.getLogger(__name__)
 
-# --- Pydantic model for request validation ---
-class BackfillRequest(BaseModel):
-    start_date: date
-    end_date: date
-
-    @field_validator('end_date')
-    def end_date_must_be_after_start_date(cls, v, info):
-        if 'start_date' in info.data and v < info.data['start_date']:
-            raise ValueError('end_date must be on or after start_date')
-        return v
+# Register Blueprints
+app.register_blueprint(features_bp)
 
 # --- Scheduler Initialization ---
 log.info("Initializing and starting the scheduler...")
@@ -46,6 +35,50 @@ scheduler.start()
 atexit.register(lambda: scheduler.stop())
 log.info("Scheduler started and daily tasks scheduled.")
 # --------------------------------
+
+# --- Blueprints ---
+sentiment_bp = Blueprint('sentiment_bp', __name__)
+
+@sentiment_bp.route('/sentiment-analysis', methods=['POST'])
+def run_sentiment_analysis():
+    """
+    Triggers sentiment analysis for pending news articles.
+    """
+    log.info("Sentiment analysis endpoint triggered.")
+    
+    config = Config()
+    storage = Storage(config)
+    
+    try:
+        # 1. Fetch pending articles
+        pending_articles = storage.get_pending_sentiment_articles()
+        if not pending_articles:
+            log.info("No pending articles found for sentiment analysis.")
+            return jsonify({"message": "No pending articles to analyze."}), 200
+
+        log.info(f"Found {len(pending_articles)} articles for sentiment analysis.")
+
+        # 2. Perform sentiment analysis
+        # The `get_pending_sentiment_articles` returns a list of tuples (id, headline)
+        sentiment_results = bulk_analyze_sentiment(pending_articles)
+
+        # 3. Update database with scores
+        if sentiment_results:
+            storage.update_sentiment_scores(sentiment_results)
+            log.info(f"Successfully updated sentiment scores for {len(sentiment_results)} articles.")
+        
+        return jsonify({
+            "message": f"Sentiment analysis completed for {len(sentiment_results)} articles."
+        }), 200
+
+    except Exception as e:
+        log.error("An error occurred during sentiment analysis.", exc_info=True)
+        return jsonify({"error": "An internal error occurred."}), 500
+    finally:
+        storage.close()
+
+app.register_blueprint(sentiment_bp, url_prefix='/data')
+
 
 # --- API Endpoints ---
 
@@ -57,122 +90,49 @@ def index():
 def health_check():
     return jsonify({"status": "healthy"}), 200
 
-@app.route('/features/backfill', methods=['POST'])
-def backfill_features():
-    """
-    Triggers a background task to calculate and store features for a given date range.
-    """
-    log.info("Feature backfill endpoint triggered.")
-    
-    # --- Request Validation ---
-    if not request.is_json:
-        return jsonify({"error": "Request must be JSON"}), 400
-    try:
-        data = BackfillRequest(**request.get_json())
-    except Exception as e:
-        return jsonify({"error": "Invalid request body", "details": str(e)}), 400
-
-    # --- Background Task Logic ---
-    def worker(start, end):
-        """The function that will run in the background thread."""
-        log.info(f"Background worker started for feature backfill: {start} to {end}.")
-        storage = None
-        try:
-            # Create a new Storage instance for this thread.
-            app_config = Config()
-            storage = Storage(config=app_config)
-            calculate_and_store_features(storage, start.isoformat(), end.isoformat())
-        except Exception as e:
-            log.error(f"Error in feature backfill worker: {e}", exc_info=True)
-        finally:
-            if storage:
-                storage.close()
-            log.info(f"Background worker finished for feature backfill: {start} to {end}.")
-
-    # --- Start the thread and return immediately ---
-    thread = threading.Thread(target=worker, args=(data.start_date, data.end_date))
-    thread.start()
-
-    return jsonify({
-        "message": f"Successfully started feature backfill from {data.start_date} to {data.end_date}. Check logs for progress."
-    }), 202
-
-
-def _backfill_one_symbol(symbol: str):
-    """
-    Helper function to backfill features for a single stock.
-    This function is designed to be run in a separate thread.
-    """
-    log.info(f"Starting feature backfill for symbol: {symbol}")
-    storage = None
-    try:
-        # Each thread must have its own Storage instance and its own Config.
-        app_config = Config()
-        storage = Storage(config=app_config)
-        
-        # Define a very wide date range to ensure all data is captured.
-        start_date = "1970-01-01"
-        end_date = date.today().isoformat()
-        
-        calculate_and_store_features(storage, start_date, end_date, symbol=symbol)
-        log.info(f"Finished feature backfill for symbol: {symbol}")
-        return True, symbol
-    except Exception as e:
-        log.error(f"Error backfilling features for {symbol}: {e}", exc_info=True)
-        return False, symbol
-    finally:
-        if storage:
-            storage.close()
-
-@app.route('/features/full-backfill', methods=['POST'])
-def full_backfill_features():
-    """
-    Triggers a full feature backfill for all stocks in parallel.
-    """
-    log.info("Parallel full feature backfill endpoint triggered.")
-
-    def worker():
-        log.info("Background worker started for parallel full feature backfill.")
-        main_storage = None
-        try:
-            app_config = Config()
-            main_storage = Storage(config=app_config)
-            symbols = main_storage.get_all_distinct_symbols()
-            log.info(f"Found {len(symbols)} symbols to backfill in parallel.")
-
-            # Use a ThreadPoolExecutor to run backfills in parallel.
-            # The number of workers can be tuned based on CPU and DB capacity.
-            with ThreadPoolExecutor(max_workers=4) as executor:
-                results = list(executor.map(_backfill_one_symbol, symbols))
-            
-            successful_jobs = sum(1 for r in results if r[0])
-            failed_symbols = [s for success, s in results if not success]
-
-            log.info(f"Parallel backfill finished. Success: {successful_jobs}/{len(symbols)}.")
-            if failed_symbols:
-                log.warning(f"The following symbols failed to backfill: {failed_symbols}")
-
-        except Exception as e:
-            log.error(f"Error in parallel full feature backfill worker: {e}", exc_info=True)
-        finally:
-            if main_storage:
-                main_storage.close()
-            log.info("Parallel full feature backfill worker finished.")
-
-    thread = threading.Thread(target=worker)
-    thread.start()
-
-    return jsonify({
-        "message": "Successfully started parallel full feature backfill for all stocks. Check logs for progress."
-    }), 202
-
-
-@app.route('/trigger-backfill', methods=['PUT'])
-def trigger_backfill():
-    log.info("Backfill endpoint triggered.")
+@app.route('/backfill/prices', methods=['POST'])
+def trigger_price_backfill():
+    log.info("Price backfill endpoint triggered.")
     count = scheduler.schedule_backfill_tasks()
     return jsonify({
-        "message": f"Successfully scheduled backfill for {count} stocks. Check logs for progress."
+        "message": f"Successfully scheduled price backfill for {count} stocks. Check logs for progress."
+    }), 202
+
+@app.route('/backfill/news/full', methods=['POST'])
+def trigger_full_news_backfill():
+    log.info("Full news backfill endpoint triggered.")
+    skip_existing = request.json.get('skip_existing', False) if request.is_json else False
+    log.info(f"Full news backfill requested with skip_existing={skip_existing}.")
+    count = scheduler.schedule_full_news_backfill_for_all_symbols(skip_existing=skip_existing)
+    return jsonify({
+        "message": f"Successfully scheduled news backfill for {count} stocks based on their price data range. Check logs for progress."
+    }), 202
+
+@app.route('/backfill/news', methods=['POST'])
+def trigger_news_backfill_for_symbol():
+    log.info("Single-symbol news backfill endpoint triggered.")
+    if not request.is_json:
+        return jsonify({"error": "Request must be JSON"}), 400
+
+    data = request.get_json()
+    symbol = data.get('symbol')
+    start_date_str = data.get('start_date')
+    end_date_str = data.get('end_date')
+
+    if not all([symbol, start_date_str, end_date_str]):
+        return jsonify({"error": "Missing 'symbol', 'start_date', or 'end_date' in request body"}), 400
+
+    try:
+        # Basic date validation
+        date.fromisoformat(start_date_str)
+        date.fromisoformat(end_date_str)
+    except ValueError:
+        return jsonify({"error": "Invalid date format. Please use YYYY-MM-DD."}), 400
+
+    scheduler.backfill_news_for_symbol(symbol=symbol, start_date=start_date_str, end_date=end_date_str)
+
+    return jsonify({
+        "message": f"Successfully scheduled news backfill for symbol {symbol} from {start_date_str} to {end_date_str}. Check logs for progress."
     }), 202
 
 @app.route('/trigger-daily-fetch', methods=['PUT'])

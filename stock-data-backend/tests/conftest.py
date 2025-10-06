@@ -6,6 +6,7 @@ import pytest
 
 from config import Config
 from data.storage import Storage
+from app import app as flask_app
 
 log = logging.getLogger(__name__)
 
@@ -77,3 +78,11 @@ def db_storage(db_connection: Storage):
             cursor.execute("TRUNCATE TABLE stock_data, news_sentiment, stock_features RESTART IDENTITY;")
     
     yield db_connection
+
+@pytest.fixture
+def app():
+    yield flask_app
+
+@pytest.fixture
+def client(app):
+    return app.test_client()

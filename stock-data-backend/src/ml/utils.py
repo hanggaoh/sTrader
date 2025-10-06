@@ -21,9 +21,6 @@ from torch.utils.data import DataLoader, Dataset
 from config import config
 from data.storage import Storage
 from ml.config import Config
-from ml.preprocessor import build_features
-from ml.preprocessor import build_features
-
 
 # ----------------------
 # MODEL DEFINITION
@@ -56,29 +53,6 @@ class LSTMClassifier(nn.Module):
 # ----------------------
 # DATA UTILITIES
 # ----------------------
-REQUIRED_COLS = ["timestamp", "symbol", "open", "high", "low", "close", "volume"]
-
-def fetch_data(storage: Storage, sql: str, logger, params: Optional[list] = None) -> pd.DataFrame:
-    logger.info("Fetching data via Storage class…")
-    with storage.pool.connection() as conn:
-        df = pd.read_sql(sql, conn, params=params)
-    df.columns = [c.lower() for c in df.columns]
-    df = df.rename(columns={"time": "timestamp", "stock_symbol": "symbol"})
-    for c in REQUIRED_COLS:
-        if c not in df.columns:
-            raise ValueError(f"Missing required column '{c}'. Columns found: {list(df.columns)}")
-    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
-    df = df.dropna(subset=["timestamp"])
-    df = df.sort_values(["symbol", "timestamp"]).reset_index(drop=True)
-    return df
-
-def attach_sentiment(df: pd.DataFrame, cfg: Config, logger) -> pd.DataFrame:
-    if cfg.const_sentiment is not None:
-        df["sentiment"] = float(cfg.const_sentiment)
-    elif "sentiment" not in df.columns:
-        df["sentiment"] = 0.0
-    return df
-
 class SequenceDataset(Dataset):
     def __init__(self, df: pd.DataFrame, feats: List[str], window: int):
         self.samples = []
@@ -131,8 +105,6 @@ def train_loop(cfg: Config, df: pd.DataFrame, feats: List[str], logger):
     logger.info(f"Using device: {device}")
 
     # --- Data Splitting and Scaling (Time-based split) ---
-    # This approach is more realistic for financial time series.
-    # We train on all stocks up to a certain point in time and validate/test on a later period.
     df = df.sort_values('timestamp')
     last_date = df['timestamp'].max()
     test_split_date = last_date - pd.DateOffset(days=int(len(df['timestamp'].unique()) * cfg.test_size))
@@ -154,12 +126,6 @@ def train_loop(cfg: Config, df: pd.DataFrame, feats: List[str], logger):
     val_df.loc[:, feats] = scaler.transform(val_df[feats])
     test_df.loc[:, feats] = scaler.transform(test_df[feats])
 
-    # --- Sanity Check: Label-Shuffle Test (for debugging data leakage) ---
-    # To run this test, uncomment the following line. If validation accuracy is still high
-    # (e.g., > 0.55) after 1 epoch, you likely have a data leak where the model can "cheat".
-    # train_df['target'] = np.random.permutation(train_df['target'].values)
-    # logger.warning("LABEL SHUFFLE TEST IS ACTIVE. Training will not be meaningful.")
-
     train_ds = SequenceDataset(train_df, feats, cfg.window)
     val_ds = SequenceDataset(val_df, feats, cfg.window)
     test_ds = SequenceDataset(test_df, feats, cfg.window)
@@ -168,7 +134,6 @@ def train_loop(cfg: Config, df: pd.DataFrame, feats: List[str], logger):
     val_loader = DataLoader(val_ds, batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers)
     test_loader = DataLoader(test_ds, batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers)
 
-    # --- Diagnostic Logging: Check a single batch ---
     try:
         x_sample, y_sample = next(iter(train_loader))
         logger.info(f"Sample batch shapes: X={x_sample.shape}, y={y_sample.shape}")
@@ -177,13 +142,9 @@ def train_loop(cfg: Config, df: pd.DataFrame, feats: List[str], logger):
         logger.error("Training loader is empty! Cannot proceed with training.")
         return None, None, {}
 
-    # --- Handle Class Imbalance with Weighted Loss ---
-    # Calculate weights to penalize misclassification of the minority class more heavily.
     class_counts = train_df['target'].value_counts().sort_index().values
     if len(class_counts) == 2:
-        # weights = 1.0 / num_samples_in_class
         weights = 1.0 / torch.tensor(class_counts, dtype=torch.float)
-        # Normalize weights
         weights = weights / weights.sum()
         class_weights = weights.to(device)
         logger.info(f"Applying class weights to handle imbalance: {class_weights.cpu().numpy().tolist()}")
@@ -193,7 +154,6 @@ def train_loop(cfg: Config, df: pd.DataFrame, feats: List[str], logger):
     model = LSTMClassifier(len(feats), cfg.hidden_size, cfg.num_layers, cfg.dropout, cfg.bidirectional).to(device)
     criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=cfg.label_smoothing)
     opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
-    # Add a learning rate scheduler to reduce LR when validation accuracy plateaus
     scheduler = ReduceLROnPlateau(opt, mode='max', factor=0.2, patience=3, verbose=True)
 
     best_val_acc, best_state, patience = 0.0, None, cfg.early_stopping_patience
@@ -217,7 +177,6 @@ def train_loop(cfg: Config, df: pd.DataFrame, feats: List[str], logger):
         val_loss, val_acc, val_f1 = evaluate_classification(model, val_loader, device, logger)
         logger.info(f"Epoch {epoch:03d} | train_loss={avg_train_loss:.4f} | val_loss={val_loss:.4f} | val_accuracy={val_acc:.4f} | val_f1={val_f1:.4f}")
 
-        # The scheduler monitors the validation accuracy
         scheduler.step(val_acc)
 
         if val_acc > best_val_acc + 1e-4:
@@ -236,29 +195,48 @@ def train_loop(cfg: Config, df: pd.DataFrame, feats: List[str], logger):
     return model, scaler, {"test_loss": test_loss, "test_accuracy": test_acc, "test_f1": test_f1}
 
 def prepare_data(cfg: Config, storage: Storage, logger) -> tuple[pd.DataFrame | None, list | None]:
-    sql_query = "SELECT time, stock_symbol, open, high, low, close, volume FROM stock_data WHERE time BETWEEN '2020-01-01' AND '2024-12-31'"
-    params = []
-    if cfg.symbols:
-        placeholders = ",".join(["%s"] * len(cfg.symbols))
-        sql_query += f" AND stock_symbol IN ({placeholders})"
-        params.extend(cfg.symbols)
-    df = fetch_data(storage, sql_query, logger, params=params)
-    if df.empty:
+    symbols_to_use = cfg.symbols
+    if not symbols_to_use:
+        all_symbols = storage.get_all_distinct_symbols()
+        if cfg.train_sample_fraction:
+            sample_size = int(len(all_symbols) * cfg.train_sample_fraction)
+            symbols_to_use = random.sample(all_symbols, sample_size)
+            logger.info(f"Randomly sampled {len(symbols_to_use)} symbols for training.")
+        else:
+            symbols_to_use = all_symbols
+
+    if not symbols_to_use:
+        logger.warning("No symbols found to train on.")
         return None, None
-    if cfg.train_sample_fraction and not cfg.symbols:
-        unique_symbols = df['symbol'].unique()
-        sample_size = int(len(unique_symbols) * cfg.train_sample_fraction)
-        if sample_size > 0:
-            sampled_symbols = random.sample(list(unique_symbols), sample_size)
-            df = df[df['symbol'].isin(sampled_symbols)]
-            logger.info(f"Randomly sampled {len(df['symbol'].unique())} symbols for training.")
+
+    df = storage.query_features_for_symbols(symbols_to_use)
+    if df.empty:
+        logger.warning("Feature query returned no data.")
+        return None, None
+
+    df = df.rename(columns={"time": "timestamp", "stock_symbol": "symbol"})
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+    df = df.sort_values(["symbol", "timestamp"]).reset_index(drop=True)
+
+    feats = [col for col in df.columns if col not in ['timestamp', 'symbol', 'target']]
+    
+    df = df.dropna(subset=feats + ['target'])
+    if df.empty:
+        logger.warning("No rows left after dropping NaNs from features and target.")
+        return None, None
+
+    df['target'] = df['target'].astype(int)
+
     counts = df.groupby('symbol').size()
     keep_syms = counts[counts >= cfg.min_per_symbol_rows].index
     df = df[df['symbol'].isin(keep_syms)].copy()
+    
     if df.empty:
+        logger.warning(f"No symbols with at least {cfg.min_per_symbol_rows} rows of feature data.")
         return None, None
-    df = attach_sentiment(df, cfg, logger)
-    df, feats = build_features(df, cfg)
+
+    logger.info(f"Prepared data for {len(df['symbol'].unique())} symbols. Total rows: {len(df)}")
+    
     return df, feats
 
 def run_training(cfg: Config):
@@ -298,25 +276,6 @@ def save_artifacts(model, scaler, cfg: Config, metrics: dict, logger) -> str:
 # UNIT TESTS
 # ----------------------
 class TestDataUtils(unittest.TestCase):
-
-    def test_build_features_classification(self):
-        """Tests the feature engineering for classification (UP/DOWN target)."""
-        data = {
-            'symbol': ['A'] * 100,
-            'close':  np.linspace(100, 150, 100),
-        }
-        df = pd.DataFrame(data)
-        cfg = Config(horizon=1)
-        logger = logging.getLogger("test_logger")
-
-        features_df, _ = build_features(df.copy(), cfg)
-
-        # The last row will have a NaN target because of the shift
-        # The first 49 rows will have NaN from sma_50
-        self.assertEqual(len(features_df), 50)
-        
-        # In a steady uptrend, all targets should be 1 (UP)
-        self.assertTrue((features_df['target'] == 1).all())
 
     def test_sequence_dataset_classification(self):
         """Tests the SequenceDataset for a classification task."""
