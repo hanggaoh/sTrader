@@ -11,6 +11,31 @@ from ml.config import Config
 
 log = logging.getLogger(__name__)
 
+def _calculate_daily_sentiment(storage: Storage, start_date: str, end_date: str) -> pd.DataFrame:
+    """
+    Fetches all scored news articles within a date range and calculates the daily average sentiment for each stock.
+    """
+    log.info(f"Calculating daily sentiment from {start_date} to {end_date}.")
+    with storage.pool.connection() as conn:
+        sql = """
+            SELECT published_at, stock_symbol, sentiment_score
+            FROM news_sentiment
+            WHERE status = 'PROCESSED' AND sentiment_score IS NOT NULL
+              AND published_at BETWEEN %s AND %s
+        """
+        sentiment_df = pd.read_sql(sql, conn, params=[start_date, end_date])
+
+    if sentiment_df.empty:
+        log.info("No processed sentiment data found for the given date range.")
+        return pd.DataFrame(columns=['date', 'symbol', 'sentiment'])
+
+    sentiment_df['date'] = pd.to_datetime(sentiment_df['published_at']).dt.date
+    daily_sentiment = sentiment_df.groupby(['date', 'stock_symbol'])['sentiment_score'].mean().reset_index()
+    daily_sentiment.rename(columns={'stock_symbol': 'symbol', 'sentiment_score': 'sentiment'}, inplace=True)
+    
+    log.info(f"Successfully calculated {len(daily_sentiment)} daily sentiment scores.")
+    return daily_sentiment
+
 def build_features(df: pd.DataFrame, cfg: Config) -> Tuple[pd.DataFrame, List[str]]:
     log.info("Building features...")
     df = df.copy()
@@ -141,12 +166,17 @@ def calculate_and_store_features(storage: Storage, start_date: str, end_date: st
     # 2. Prepare the DataFrame for feature building
     raw_df = raw_df.rename(columns={"stock_symbol": "symbol", "time": "timestamp"})
     raw_df["timestamp"] = pd.to_datetime(raw_df["timestamp"], utc=True)
-    
-    # build_features expects a sentiment column. We'll join it in the future,
-    # but for now, we'll use a placeholder.
-    raw_df['sentiment'] = 0.0
+    raw_df['date'] = raw_df['timestamp'].dt.date
 
-    # 3. Build features
+    # 3. Calculate and merge daily sentiment scores
+    daily_sentiment_df = _calculate_daily_sentiment(storage, start_date, end_date)
+    if not daily_sentiment_df.empty:
+        raw_df = pd.merge(raw_df, daily_sentiment_df, on=['date', 'symbol'], how='left')
+        raw_df['sentiment'].fillna(0.0, inplace=True) # Fill missing sentiment with neutral
+    else:
+        raw_df['sentiment'] = 0.0 # If no sentiment data, default to neutral
+
+    # 4. Build features
     # We can use a default config for the feature calculation.
     cfg = Config(horizon=1)
     features_df, _ = build_features(raw_df, cfg)
@@ -155,7 +185,7 @@ def calculate_and_store_features(storage: Storage, start_date: str, end_date: st
         log.warning("Feature calculation resulted in an empty DataFrame. Nothing to store.")
         return
 
-    # 4. Store the new features in the database
+    # 5. Store the new features in the database
     log.info(f"Storing {len(features_df)} rows of calculated features...")
     storage.store_features(features_df)
     log.info("Feature calculation and storage complete.")

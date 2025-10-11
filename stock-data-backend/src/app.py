@@ -12,13 +12,11 @@ if __name__ != "__main__":
     logging.getLogger("tz_kv").setLevel(logging.WARNING)
 
 # --- Now, import the rest of the application ---
-from flask import Flask, jsonify, request, Blueprint
+from flask import Flask, jsonify, request
 
 from scheduler.task import TaskScheduler
 from routes.features import features_bp
-from data.storage import Storage
-from data.sentiment import bulk_analyze_sentiment
-from config import Config
+from routes.sentiment import sentiment_bp
 
 app = Flask(__name__)
 app.logger.setLevel(logging.DEBUG)
@@ -26,6 +24,7 @@ log = logging.getLogger(__name__)
 
 # Register Blueprints
 app.register_blueprint(features_bp)
+app.register_blueprint(sentiment_bp, url_prefix='/sentiment')
 
 # --- Scheduler Initialization ---
 log.info("Initializing and starting the scheduler...")
@@ -35,49 +34,6 @@ scheduler.start()
 atexit.register(lambda: scheduler.stop())
 log.info("Scheduler started and daily tasks scheduled.")
 # --------------------------------
-
-# --- Blueprints ---
-sentiment_bp = Blueprint('sentiment_bp', __name__)
-
-@sentiment_bp.route('/sentiment-analysis', methods=['POST'])
-def run_sentiment_analysis():
-    """
-    Triggers sentiment analysis for pending news articles.
-    """
-    log.info("Sentiment analysis endpoint triggered.")
-    
-    config = Config()
-    storage = Storage(config)
-    
-    try:
-        # 1. Fetch pending articles
-        pending_articles = storage.get_pending_sentiment_articles()
-        if not pending_articles:
-            log.info("No pending articles found for sentiment analysis.")
-            return jsonify({"message": "No pending articles to analyze."}), 200
-
-        log.info(f"Found {len(pending_articles)} articles for sentiment analysis.")
-
-        # 2. Perform sentiment analysis
-        # The `get_pending_sentiment_articles` returns a list of tuples (id, headline)
-        sentiment_results = bulk_analyze_sentiment(pending_articles)
-
-        # 3. Update database with scores
-        if sentiment_results:
-            storage.update_sentiment_scores(sentiment_results)
-            log.info(f"Successfully updated sentiment scores for {len(sentiment_results)} articles.")
-        
-        return jsonify({
-            "message": f"Sentiment analysis completed for {len(sentiment_results)} articles."
-        }), 200
-
-    except Exception as e:
-        log.error("An error occurred during sentiment analysis.", exc_info=True)
-        return jsonify({"error": "An internal error occurred."}), 500
-    finally:
-        storage.close()
-
-app.register_blueprint(sentiment_bp, url_prefix='/data')
 
 
 # --- API Endpoints ---
@@ -106,6 +62,22 @@ def trigger_full_news_backfill():
     count = scheduler.schedule_full_news_backfill_for_all_symbols(skip_existing=skip_existing)
     return jsonify({
         "message": f"Successfully scheduled news backfill for {count} stocks based on their price data range. Check logs for progress."
+    }), 202
+
+@app.route('/backfill/news/insufficient', methods=['POST'])
+def trigger_insufficient_news_backfill():
+    log.info("Insufficient news backfill endpoint triggered.")
+    if not request.is_json or 'threshold' not in request.json:
+        return jsonify({"error": "Request must be JSON and contain a 'threshold' key."}), 400
+
+    try:
+        threshold = int(request.json['threshold'])
+    except (ValueError, TypeError):
+        return jsonify({"error": "'threshold' must be an integer."}), 400
+
+    count = scheduler.schedule_insufficient_news_backfill(threshold)
+    return jsonify({
+        "message": f"Successfully scheduled repair backfill for {count} stocks. Check logs for progress."
     }), 202
 
 @app.route('/backfill/news', methods=['POST'])

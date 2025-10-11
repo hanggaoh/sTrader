@@ -35,13 +35,32 @@ class TaskScheduler:
 
     def _get_stock_list(self) -> List[Dict[str, str]]:
         log.info("Determining stock list source...")
+
+        # Always load the JSON file to get the symbol-to-name mapping.
+        stock_list_from_json = self._get_stock_list_from_json()
+        if not stock_list_from_json:
+            log.error("Could not load stock list from JSON. Cannot proceed with scheduling news tasks.")
+            return []
+
+        symbol_to_name_map = {stock['symbol']: stock['name'] for stock in stock_list_from_json}
+
+        # Prioritize using symbols that are actually in our database.
         db_symbols = self.storage.get_all_distinct_symbols()
         if db_symbols:
             log.info(f"Using {len(db_symbols)} symbols from the database as the source of truth.")
-            return [{'symbol': symbol, 'name': symbol} for symbol in db_symbols]
-        
-        log.warning("Database contains no stock symbols. Falling back to JSON file for initial list.")
-        return self._get_stock_list_from_json()
+            # Create the final list, ensuring we have the correct name for each symbol.
+            final_stock_list = []
+            for symbol in db_symbols:
+                name = symbol_to_name_map.get(symbol)
+                if name:
+                    final_stock_list.append({'symbol': symbol, 'name': name})
+                else:
+                    log.warning(f"Symbol {symbol} from database not found in JSON file. Using symbol as name.")
+                    final_stock_list.append({'symbol': symbol, 'name': symbol})
+            return final_stock_list
+
+        log.warning("Database contains no stock symbols. Falling back to full JSON file for initial list.")
+        return stock_list_from_json
 
     def _get_stock_list_from_json(self) -> List[Dict[str, str]]:
         json_path = os.path.join(os.path.dirname(__file__), '../data/chinese_stocks.json')
@@ -99,12 +118,29 @@ class TaskScheduler:
             try:
                 articles = fetch_news_for_symbol(stock['symbol'], stock['name'])
                 if articles:
-                    records_to_store = [(a['publishedAt'], stock['symbol'], a['title'], a.get('url'), a.get('content')) for a in articles if a.get('title')]
-                    if records_to_store:
+                    # Deduplicate articles by headline before storing
+                    seen_headlines = set()
+                    unique_articles = []
+                    for article in articles:
+                        headline = article.get('title')
+                        if headline and headline not in seen_headlines:
+                            unique_articles.append(article)
+                            seen_headlines.add(headline)
+
+                    if len(articles) > len(unique_articles):
+                        log.info(f"Removed {len(articles) - len(unique_articles)} duplicate articles for symbol {stock['symbol']}.")
+
+                    if unique_articles:
+                        records_to_store = [(a['publishedAt'], stock['symbol'], a['title'], a.get('url'), a.get('content')) for a in unique_articles if a.get('content')]
                         self.storage.store_raw_news(records_to_store)
-                time.sleep(random.uniform(1.0, 2.0))
+                
+                # Sleep to respect NewsAPI's rate limit on the developer plan.
+                sleep_duration = random.uniform(10.0, 15.0)
+                log.info(f"Sleeping for {sleep_duration:.2f} seconds to respect API rate limit.")
+                time.sleep(sleep_duration)
+
             except Exception as e:
-                log.error(f"Error fetching news for {stock['symbol']}: {e}", exc_info=True)
+                log.error(f"Error fetching news for {stock['symbol']} ({stock['name']}): {e}", exc_info=True)
         log.info("Master news fetch job complete.")
 
     def _run_sentiment_analysis_loop(self):
@@ -180,6 +216,40 @@ class TaskScheduler:
                 scheduled_count += 1
         
         log.info(f"Completed scheduling. A total of {scheduled_count} news backfill jobs were scheduled.")
+        return scheduled_count
+
+    def schedule_insufficient_news_backfill(self, threshold: int):
+        """
+        Schedules a news backfill for symbols with a news count below the threshold.
+        """
+        log.info(f"Starting backfill for symbols with fewer than {threshold} news articles.")
+        insufficient_symbols = self.storage.get_symbols_with_insufficient_news(threshold)
+        if not insufficient_symbols:
+            log.info("No symbols found with insufficient news. Nothing to do.")
+            return 0
+
+        all_date_ranges = self.storage.get_stock_data_date_ranges()
+        date_ranges_map = {symbol: (start, end) for symbol, start, end in all_date_ranges}
+
+        scheduled_count = 0
+        for symbol in insufficient_symbols:
+            if symbol in date_ranges_map:
+                start_date, end_date = date_ranges_map[symbol]
+                if start_date and end_date:
+                    job_id = f"news_backfill_for_{symbol}" # Use the same job ID to replace existing
+                    self.scheduler.add_job(
+                        self._run_eastmoney_news_backfill,
+                        args=[symbol, start_date.isoformat(), end_date.isoformat()],
+                        id=job_id,
+                        replace_existing=True, # Replace any existing job for this symbol
+                        executor='backfill_executor'
+                    )
+                    log.info(f"Scheduled repair backfill for {symbol} from {start_date} to {end_date}.")
+                    scheduled_count += 1
+            else:
+                log.warning(f"Could not find date range for symbol {symbol}. Skipping backfill.")
+
+        log.info(f"Completed scheduling. A total of {scheduled_count} repair backfill jobs were scheduled.")
         return scheduled_count
 
     def backfill_news_for_symbol(self, symbol: str, start_date: str, end_date: str):
