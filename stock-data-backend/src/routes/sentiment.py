@@ -7,7 +7,7 @@ from data.sentiment import analyze_sentiment
 from data.storage import Storage
 
 log = logging.getLogger(__name__)
-sentiment_bp = Blueprint('sentiment_bp', __name__)
+sentiment_bp = Blueprint('sentiment_bp', __name__, url_prefix='/sentiment')
 
 
 @sentiment_bp.route('/backfill', methods=['POST'])
@@ -18,7 +18,9 @@ def run_sentiment_analysis_backfill():
     """
     log.info("Sentiment analysis backfill endpoint triggered.")
 
-    limit = request.json.get('limit') if request.is_json else None
+    # Use get_json(silent=True) to avoid errors on empty or non-JSON bodies
+    data = request.get_json(silent=True) or {}
+    limit = data.get('limit')
 
     config = Config()
     storage = Storage(config)
@@ -34,15 +36,23 @@ def run_sentiment_analysis_backfill():
         if not pending_articles:
             return jsonify({"message": "No pending articles to analyze."}), 200
 
+        total_articles = len(pending_articles)
         results = []
+        processed_count = 0
+
         with ThreadPoolExecutor(max_workers=4) as executor:
-            future_to_article = {executor.submit(analyze_sentiment, article[1]): article for article in
-                                 pending_articles}
+            future_to_article = {executor.submit(analyze_sentiment, article[1], article[2]): article for article in pending_articles}
+            
             for future in as_completed(future_to_article):
                 article = future_to_article[future]
                 try:
                     score = future.result()
                     results.append((score, article[0]))
+                    processed_count += 1
+
+                    if processed_count % 500 == 0:
+                        log.info(f"Sentiment analysis progress: {processed_count}/{total_articles} articles processed.")
+
                 except Exception as exc:
                     log.error(f'Article ID {article[0]} generated an exception: {exc}')
 

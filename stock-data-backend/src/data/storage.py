@@ -156,7 +156,7 @@ class Storage:
 
     def get_pending_sentiment_articles(self, limit: int = 100) -> list:
         """Fetches articles that have not yet been processed."""
-        sql = "SELECT id, headline FROM news_sentiment WHERE status = 'PENDING' LIMIT %s;"
+        sql = "SELECT id, headline, content FROM news_sentiment WHERE status = 'PENDING' LIMIT %s;"
         with self.pool.connection() as conn:
             with conn.cursor() as cursor:
                 cursor.execute(sql, (limit,))
@@ -164,7 +164,7 @@ class Storage:
 
     def get_all_pending_sentiment_articles(self) -> list:
         """Fetches all articles that have not yet been processed."""
-        sql = "SELECT id, headline FROM news_sentiment WHERE status = 'PENDING';"
+        sql = "SELECT id, headline, content FROM news_sentiment WHERE status = 'PENDING';"
         with self.pool.connection() as conn:
             with conn.cursor() as cursor:
                 cursor.execute(sql)

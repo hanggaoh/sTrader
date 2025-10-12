@@ -24,7 +24,7 @@ log = logging.getLogger(__name__)
 
 # Register Blueprints
 app.register_blueprint(features_bp)
-app.register_blueprint(sentiment_bp, url_prefix='/sentiment')
+app.register_blueprint(sentiment_bp)
 
 # --- Scheduler Initialization ---
 log.info("Initializing and starting the scheduler...")
