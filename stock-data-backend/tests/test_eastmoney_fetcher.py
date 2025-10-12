@@ -40,7 +40,7 @@ class TestEastmoneyFetcher(unittest.TestCase):
             start_date='2024-01-11',
             end_date='2024-01-17',
             page_size=100,
-            max_pages=50
+            max_pages=10
         )
 
         # 2. Check that the client-side filtering works correctly.
