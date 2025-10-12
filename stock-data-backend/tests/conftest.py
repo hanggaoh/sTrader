@@ -59,6 +59,15 @@ def db_connection():
 
     # Now, connect to the test database and set up the schema.
     storage = Storage(config=test_config)
+
+    # Drop tables to ensure a fresh schema for each test session.
+    with storage.pool.connection() as conn:
+        with conn.cursor() as cursor:
+            log.info("Dropping existing tables for a clean test session...")
+            cursor.execute("DROP TABLE IF EXISTS stock_features;")
+            cursor.execute("DROP TABLE IF EXISTS news_sentiment;")
+            cursor.execute("DROP TABLE IF EXISTS stock_data;")
+
     storage.setup_database()
 
     yield storage
