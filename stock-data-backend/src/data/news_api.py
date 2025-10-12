@@ -1,17 +1,19 @@
 import logging
-import os
 from datetime import date
 from typing import Optional, List, Dict
 
 import requests
-from dotenv import load_dotenv
+
+from config import config
 
 log = logging.getLogger(__name__)
 
-load_dotenv()
-NEWS_API_KEY = os.getenv("NEWS_API_KEY")
-
-def fetch_news_for_symbol(symbol: str, stock_name: str, from_date: Optional[date] = None, to_date: Optional[date] = None) -> Optional[List[Dict]]:
+def fetch_news_for_symbol(
+    symbol: str, 
+    stock_name: str, 
+    from_date: Optional[date] = None, 
+    to_date: Optional[date] = None
+) -> Optional[List[Dict]]:
     """
     Fetches news articles for a given stock symbol by searching for its name within a date range.
 
@@ -24,8 +26,8 @@ def fetch_news_for_symbol(symbol: str, stock_name: str, from_date: Optional[date
     Returns:
         A list of article dictionaries, or None if the API key is missing or an error occurs.
     """
-    if not NEWS_API_KEY:
-        log.warning("NEWS_API_KEY is not set. Cannot fetch news.")
+    if not config.news_api_key:
+        log.warning("NEWS_API_KEY is not set in the configuration. Cannot fetch news.")
         return None
 
     url = (
@@ -33,7 +35,7 @@ def fetch_news_for_symbol(symbol: str, stock_name: str, from_date: Optional[date
         f"q=\"{stock_name}\"&"
         f"language=zh&"
         f"sortBy=publishedAt&"
-        f"apiKey={NEWS_API_KEY}"
+        f"apiKey={config.news_api_key}"
     )
 
     if from_date and to_date:

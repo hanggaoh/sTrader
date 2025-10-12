@@ -6,6 +6,7 @@ Recursive pagination for Eastmoney stock news
 
 import json
 import logging
+import re
 import time
 from datetime import datetime
 
@@ -186,24 +187,40 @@ class EastmoneyFetcher:
             full_df = pd.concat(all_dfs, ignore_index=True)
             initial_rows = len(full_df)
 
-            # Normalize content to handle variations in <em> tags for robust de-duplication.
+            # --- Clean and Normalize Content ---
             if 'content' in full_df.columns:
-                full_df['normalized_content'] = full_df['content'].str.replace('<em>', '', regex=False).str.replace('</em>', '', regex=False)
-                subset_cols = ['date', 'title', 'normalized_content']
+                # Remove HTML tags like <em>
+                full_df['content'] = full_df['content'].str.replace('<em>', '', regex=False).str.replace('</em>', '', regex=False)
+                # Remove truncation markers and other artifacts
+                full_df['content'] = full_df['content'].apply(
+                    lambda x: re.sub(r'\s*\[\+\d+ chars\]', '', x).replace('\r', ' ').strip() if isinstance(x, str) else ''
+                )
+                subset_cols = ['date', 'title', 'content']
             else:
                 subset_cols = ['date', 'title']
 
             full_df.drop_duplicates(subset=subset_cols, inplace=True)
+
+            # --- Data Quality Filtering ---
+            if 'title' in full_df.columns:
+                initial_rows_after_dedup = len(full_df)
+                full_df = full_df[full_df['title'].str.len() >= 10]
+                rows_after_title_filter = len(full_df)
+                if initial_rows_after_dedup > rows_after_title_filter:
+                    log.info(f"Filtered out {initial_rows_after_dedup - rows_after_title_filter} articles with short titles.")
             
-            # Clean up the temporary column if it was created
-            if 'normalized_content' in full_df.columns:
-                full_df.drop(columns=['normalized_content'], inplace=True)
+            if 'content' in full_df.columns:
+                initial_rows_after_title_filter = len(full_df)
+                full_df = full_df[full_df['content'].str.len() >= 20]
+                rows_after_content_filter = len(full_df)
+                if initial_rows_after_title_filter > rows_after_content_filter:
+                    log.info(f"Filtered out {initial_rows_after_title_filter - rows_after_content_filter} articles with short content.")
 
             final_rows = len(full_df)
             if initial_rows > final_rows:
-                log.info(f"Removed {initial_rows - final_rows} duplicate articles found across pages.")
+                log.info(f"Removed {initial_rows - final_rows} duplicate or low-quality articles in total.")
             else:
-                log.info("No duplicate articles found across pages.")
+                log.info("No duplicate or low-quality articles found.")
 
             return full_df
         else:

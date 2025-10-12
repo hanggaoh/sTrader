@@ -109,32 +109,33 @@ class Storage:
                 log.info(f"Found {len(results)} symbols with date ranges.")
                 return results
 
-    def get_news_summary_by_symbol(self) -> list[tuple]:
+    def get_symbols_with_insufficient_news(self, threshold: int) -> list[str]:
         """
-        Fetches a summary of news data, grouped by stock symbol, including count and date range.
-
-        Returns:
-            A list of tuples, where each tuple contains:
-            (stock_symbol, news_count, min_date, max_date)
+        Fetches stock symbols that have a number of news articles below the given threshold.
         """
-        log.info("Querying database for news summary by symbol...")
+        log.info(f"Querying for symbols with fewer than {threshold} news articles...")
         query = """
-            SELECT
-                stock_symbol,
-                COUNT(*) AS news_count,
-                MIN(published_at)::date AS min_date,
-                MAX(published_at)::date AS max_date
-            FROM
-                news_sentiment
-            GROUP BY
-                stock_symbol
-            ORDER BY
-                news_count DESC;
+            SELECT stock_symbol
+            FROM (
+                SELECT
+                    unique_symbols.stock_symbol,
+                    COUNT(ns.id) AS news_count
+                FROM
+                    (SELECT DISTINCT stock_symbol FROM stock_data) AS unique_symbols
+                LEFT JOIN
+                    news_sentiment ns ON unique_symbols.stock_symbol = ns.stock_symbol
+                GROUP BY
+                    unique_symbols.stock_symbol
+            ) AS symbol_news_counts
+            WHERE news_count < %s;
         """
         with self.pool.connection() as conn:
             with conn.cursor() as cursor:
-                cursor.execute(query)
-                return cursor.fetchall()
+                cursor.execute(query, (threshold,))
+                results = cursor.fetchall()
+                symbols = [row[0] for row in results]
+                log.info(f"Found {len(symbols)} symbols with fewer than {threshold} news articles.")
+                return symbols
 
     def store_raw_news(self, articles: list):
         """Inserts or updates raw news articles, ignoring duplicates based on a composite key."""
@@ -155,10 +156,18 @@ class Storage:
 
     def get_pending_sentiment_articles(self, limit: int = 100) -> list:
         """Fetches articles that have not yet been processed."""
-        sql = "SELECT id, headline FROM news_sentiment WHERE status = 'PENDING' LIMIT %s;"
+        sql = "SELECT id, headline, content FROM news_sentiment WHERE status = 'PENDING' LIMIT %s;"
         with self.pool.connection() as conn:
             with conn.cursor() as cursor:
                 cursor.execute(sql, (limit,))
+                return cursor.fetchall()
+
+    def get_all_pending_sentiment_articles(self) -> list:
+        """Fetches all articles that have not yet been processed."""
+        sql = "SELECT id, headline, content FROM news_sentiment WHERE status = 'PENDING';"
+        with self.pool.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(sql)
                 return cursor.fetchall()
 
     def update_sentiment_scores(self, results: list):

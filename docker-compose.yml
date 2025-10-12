@@ -17,20 +17,37 @@ services:
       timeout: 5s
       retries: 5
 
+  db-backup:
+    image: timescale/timescaledb:latest-pg16
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./backup_database.sh:/usr/local/bin/backup_database.sh
+      - ./backups:/backups
+    environment:
+      - BACKUP_DIR=/backups
+      - POSTGRES_HOST=db
+      - POSTGRES_DB=strader_db
+      - POSTGRES_USER=strader_user
+      - POSTGRES_PASSWORD=my-secret-pw
+    command: ["sh", "/usr/local/bin/backup_database.sh"]
+
   backend:
     build:
       context: ./stock-data-backend
       target: final
     restart: always
     depends_on:
-      db:
-        condition: service_healthy
+      db-backup:
+        condition: service_completed_successfully
     environment:
       - DB_HOST=db
       - DB_NAME=strader_db
       - DB_USER=strader_user
       - DB_PASSWORD=my-secret-pw
       - DB_PORT=5432
+      - NEWS_API_KEY=285e22d197ff4ea6a6ae6112009d6c71
     ports:
       - "8000:8000"
     healthcheck:
@@ -45,8 +62,8 @@ services:
       context: ./stock-data-backend
       target: test
     depends_on:
-      db:
-        condition: service_healthy
+      db-backup:
+        condition: service_completed_successfully
     environment:
       - DB_HOST=db
       - DB_NAME=strader_test_db # Use a separate database for testing

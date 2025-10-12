@@ -1,41 +1,47 @@
+import os
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
-# Load FinBERT model and tokenizer
-tokenizer = AutoTokenizer.from_pretrained("ProsusAI/finbert")
-model = AutoModelForSequenceClassification.from_pretrained("ProsusAI/finbert")
+# Load the model from the local directory
+MODEL_PATH = os.path.join(os.path.dirname(__file__), "../ml/models/finetuned-finbert-chinese-v1")
 
-def analyze_sentiment(text: str) -> float:
+tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
+model = AutoModelForSequenceClassification.from_pretrained(MODEL_PATH)
+
+def analyze_sentiment(title: str, content: str | None) -> float:
     """
-    Analyzes the sentiment of a given text using FinBERT.
+    Analyzes the sentiment of a given text using the speedxd/finetuned-finbert-chinese-v1 model.
     Returns a sentiment score between -1 (negative) and 1 (positive).
     """
-    if not text:
+    # Combine title and content for a more comprehensive analysis
+    full_text = f"{title}. {content}" if content else title
+
+    if not full_text.strip():
         return 0.0
 
-    inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
+    inputs = tokenizer(full_text, return_tensors="pt", truncation=True, max_length=512)
     with torch.no_grad():
         logits = model(**inputs).logits
 
-    # The model returns logits for positive, negative, neutral.
+    # The model returns logits for [positive, neutral, negative].
     # We can convert this to a single score: (positive - negative).
     probabilities = torch.nn.functional.softmax(logits, dim=-1)[0]
-    # According to the model card, the labels are: 0: positive, 1: negative, 2: neutral
     positive_prob = probabilities[0].item()
-    negative_prob = probabilities[1].item()
+    negative_prob = probabilities[2].item()
+    # neutral_prob = probabilities[1].item() # This is available if needed
     
     score = positive_prob - negative_prob
     return score
 
-def bulk_analyze_sentiment(headlines: list[tuple[int, str]]) -> list[tuple[float, int]]:
+def bulk_analyze_sentiment(articles: list[tuple[int, str, str | None]]) -> list[tuple[float, int]]:
     """
-    Performs sentiment analysis on a batch of headlines.
+    Performs sentiment analysis on a batch of articles (id, headline, content).
     """
-    if not headlines:
+    if not articles:
         return []
 
     results = []
-    for id, headline_text in headlines:
-        score = analyze_sentiment(headline_text)
-        results.append((score, id))
+    for article_id, headline, content in articles:
+        score = analyze_sentiment(headline, content)
+        results.append((score, article_id))
     return results
