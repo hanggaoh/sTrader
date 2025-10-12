@@ -35,7 +35,7 @@ class EastmoneyFetcher:
                 start_date=start_date,
                 end_date=end_date,
                 page_size=100,
-                max_pages=50
+                max_pages=10
             )
             if df.empty:
                 log.info(f"Eastmoney returned no news for symbol {symbol}.")
