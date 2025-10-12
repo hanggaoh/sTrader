@@ -187,36 +187,53 @@ class TaskScheduler:
 
     def schedule_full_news_backfill_for_all_symbols(self, skip_existing: bool = False):
         """
-        Schedules a news backfill job for all symbols in the stock_data table,
-        using the date range of the available price data for each symbol.
+        Schedules a single news backfill job for all symbols, iterating through them
+        in a memory-efficient way.
+        """
+        log.info("Scheduling a single, comprehensive news backfill job.")
+        
+        # This function will now run in the background via the scheduler
+        self.scheduler.add_job(
+            self._run_full_news_backfill_loop,
+            args=[skip_existing],
+            id="master_news_backfill_job",
+            replace_existing=True,
+            executor='backfill_executor'
+        )
+        
+        log.info("Master news backfill job has been scheduled.")
+        # We can't return a precise count anymore as it runs in the background
+        return "Job Scheduled"
+
+    def _run_full_news_backfill_loop(self, skip_existing: bool):
+        """
+        The actual job that iterates through all symbols and triggers their
+        news backfill.
         """
         log.info("Starting full news backfill for all symbols based on stock data date ranges.")
         symbol_date_ranges = self.storage.get_stock_data_date_ranges()
         if not symbol_date_ranges:
-            log.warning("No stock data found in the database. Cannot schedule news backfill.")
-            return 0
+            log.warning("No stock data found in the database. Cannot perform news backfill.")
+            return
 
         log.info(f"Found {len(symbol_date_ranges)} symbols with date ranges to backfill news for.")
-        scheduled_count = 0
-        for symbol, start_date, end_date in symbol_date_ranges:
+        
+        for i, (symbol, start_date, end_date) in enumerate(symbol_date_ranges):
+            if (i + 1) % 100 == 0:
+                log.info(f"News backfill progress: {i + 1}/{len(symbol_date_ranges)} symbols processed.")
+
             if start_date and end_date:
                 if skip_existing and self.storage.has_news_for_symbol(symbol):
                     log.info(f"Skipping news backfill for {symbol} as it already has news.")
                     continue
-
-                job_id = f"news_backfill_for_{symbol}"
-                self.scheduler.add_job(
-                    self._run_eastmoney_news_backfill,
-                    args=[symbol, start_date.isoformat(), end_date.isoformat()],
-                    id=job_id,
-                    replace_existing=True,
-                    executor='backfill_executor'
-                )
-                log.info(f"Scheduled news backfill for {symbol} from {start_date} to {end_date}.")
-                scheduled_count += 1
+                
+                # Directly call the backfill logic instead of creating a new job
+                self._run_eastmoney_news_backfill(symbol, start_date.isoformat(), end_date.isoformat())
+                
+                # Add a small delay to avoid overwhelming the system
+                time.sleep(random.uniform(0.5, 1.5))
         
-        log.info(f"Completed scheduling. A total of {scheduled_count} news backfill jobs were scheduled.")
-        return scheduled_count
+        log.info("Completed the master news backfill job for all symbols.")
 
     def schedule_insufficient_news_backfill(self, threshold: int):
         """
