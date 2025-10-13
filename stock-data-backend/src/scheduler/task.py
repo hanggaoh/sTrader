@@ -3,7 +3,6 @@ import logging
 import os
 import random
 import time
-from datetime import date, timedelta
 from typing import List, Dict
 
 from apscheduler.executors.pool import ThreadPoolExecutor
@@ -12,10 +11,9 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from config import config
 from data.fetcher import StockDataFetcher
 from data.storage import Storage
-from data.news_api import fetch_news_for_symbol
-from data.sentiment import analyze_sentiment
-from ml.preprocessor import calculate_and_store_features
 from data.eastmoney_fetcher import EastmoneyFetcher
+from scheduler.tasks.price_fetch import PriceFetchTask
+from scheduler.tasks.news_fetch import NewsFetchTask
 
 log = logging.getLogger(__name__)
 
@@ -88,100 +86,42 @@ class TaskScheduler:
             log.warning("No stocks found, skipping all daily task scheduling.")
             return
 
-        self.scheduler.add_job(self._run_daily_fetch_loop, 'cron', hour=4, minute=0, args=[[s['symbol'] for s in stock_list], 5], id="master_price_job", replace_existing=True, executor='cron_executor')
+        stock_symbols = [s['symbol'] for s in stock_list]
+
+        price_task = PriceFetchTask(self.scheduler, self.storage, self.fetcher, stock_symbols, days=5)
+        news_task = NewsFetchTask(self.scheduler, self.storage, stock_list)
+
+        self.scheduler.add_job(price_task.run, 'cron', hour=4, minute=0, id="master_price_job", replace_existing=True, executor='cron_executor')
         log.info(f"Scheduled daily price fetch job for {len(stock_list)} stocks.")
 
-        self.scheduler.add_job(self._run_daily_feature_calculation, 'cron', hour=4, minute=30, id="master_feature_job", replace_existing=True, executor='cron_executor')
-        log.info("Scheduled daily feature calculation job.")
-
-        self.scheduler.add_job(self._run_daily_news_fetch_loop, 'cron', hour=5, minute=0, args=[stock_list], id="master_news_fetch_job", replace_existing=True, executor='cron_executor')
+        self.scheduler.add_job(news_task.run, 'cron', hour=5, minute=0, id="master_news_fetch_job", replace_existing=True, executor='cron_executor')
         log.info(f"Scheduled daily news fetch job for {len(stock_list)} stocks.")
-
-        self.scheduler.add_job(self._run_sentiment_analysis_loop, 'cron', hour=5, minute=15, id="master_sentiment_analysis_job", replace_existing=True, executor='cron_executor')
-        log.info("Scheduled sentiment analysis job.")
-
-    def _run_daily_feature_calculation(self):
-        log.info("Starting daily feature calculation job.")
-        try:
-            end_date = date.today()
-            start_date = end_date - timedelta(days=90)
-            calculate_and_store_features(self.storage, start_date.isoformat(), end_date.isoformat())
-        except Exception as e:
-            log.error(f"An error occurred during the daily feature calculation job: {e}", exc_info=True)
-        log.info("Daily feature calculation job finished.")
-
-    def _run_daily_news_fetch_loop(self, stock_list: List[Dict[str, str]]):
-        log.info(f"Starting master news fetch job for {len(stock_list)} stocks.")
-        for i, stock in enumerate(stock_list):
-            if (i + 1) % 50 == 0:
-                log.info(f"News fetch progress: {i + 1}/{len(stock_list)} stocks processed.")
-            try:
-                articles = fetch_news_for_symbol(stock['symbol'], stock['name'])
-                if articles:
-                    # Deduplicate articles by headline before storing
-                    seen_headlines = set()
-                    unique_articles = []
-                    for article in articles:
-                        headline = article.get('title')
-                        if headline and headline not in seen_headlines:
-                            unique_articles.append(article)
-                            seen_headlines.add(headline)
-
-                    if len(articles) > len(unique_articles):
-                        log.info(f"Removed {len(articles) - len(unique_articles)} duplicate articles for symbol {stock['symbol']}.")
-
-                    if unique_articles:
-                        records_to_store = [(a['publishedAt'], stock['symbol'], a['title'], a.get('url'), a.get('content')) for a in unique_articles if a.get('content')]
-                        self.storage.store_raw_news(records_to_store)
-                
-                # Sleep to respect NewsAPI's rate limit on the developer plan.
-                sleep_duration = random.uniform(10.0, 15.0)
-                log.info(f"Sleeping for {sleep_duration:.2f} seconds to respect API rate limit.")
-                time.sleep(sleep_duration)
-
-            except Exception as e:
-                log.error(f"Error fetching news for {stock['symbol']} ({stock['name']}): {e}", exc_info=True)
-        log.info("Master news fetch job complete.")
-
-    def _run_sentiment_analysis_loop(self):
-        log.info("Starting sentiment analysis job.")
-        try:
-            pending_articles = self.storage.get_pending_sentiment_articles(limit=500)
-            if not pending_articles:
-                log.info("No pending articles to analyze.")
-                return
-            log.info(f"Found {len(pending_articles)} pending articles to analyze.")
-            results = []
-            for article_id, headline in pending_articles:
-                score = analyze_sentiment(headline)
-                if score is not None:
-                    results.append((score, article_id))
-            if results:
-                self.storage.update_sentiment_scores(results)
-                log.info(f"Successfully analyzed and updated {len(results)} articles.")
-        except Exception as e:
-            log.error(f"An error occurred during the sentiment analysis loop: {e}", exc_info=True)
-        log.info("Sentiment analysis job complete.")
 
     def run_daily_fetch_now(self, days=5):
         stock_list = self._get_stock_list()
         if not stock_list:
             return 0
+        
+        stock_symbols = [s['symbol'] for s in stock_list]
+        price_task = PriceFetchTask(self.scheduler, self.storage, self.fetcher, stock_symbols, days=days)
+
         log.info("Scheduling an immediate one-time run of the daily fetch job.")
-        self.scheduler.add_job(self._run_daily_fetch_loop, args=[[s['symbol'] for s in stock_list], days], id="immediate_daily_fetch", replace_existing=True)
+        self.scheduler.add_job(price_task.run, id="immediate_daily_fetch", replace_existing=True)
         return len(stock_list)
 
     def fetch_single_stock_now(self, symbol: str, days: int = 5):
         log.info(f"Scheduling an immediate one-time fetch for {symbol} for the last {days} days.")
         period_str = f"{days}d"
         job_id = f"fetch_single_{symbol}_{int(time.time())}"
-        self.scheduler.add_job(self._fetch_and_store_price, args=[symbol, period_str, "single-fetch"], id=job_id, replace_existing=False, executor='repair_executor')
+        price_task = PriceFetchTask(self.scheduler, self.storage, self.fetcher, days=days)
+        self.scheduler.add_job(price_task._fetch_and_store_price, args=[symbol, period_str, "single-fetch"], id=job_id, replace_existing=False, executor='repair_executor')
 
     def schedule_backfill_tasks(self):
         stock_list = self._get_stock_list_from_json()
         if not stock_list:
             return 0
-        self.scheduler.add_job(self._run_full_backfill_loop, args=[stock_list], id="master_backfill_job", replace_existing=True, executor='backfill_executor')
+        price_task = PriceFetchTask(self.scheduler, self.storage, self.fetcher, stock_symbols=self._get_stock_list(), days=365 * 30)
+        self.scheduler.add_job(price_task.run, args=[stock_list], id="scheduled_backfill_job", replace_existing=True, executor='backfill_executor')
         log.info(f"Scheduled a single backfill job for {len(stock_list)} stocks.")
         return len(stock_list)
 
