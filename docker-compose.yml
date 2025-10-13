@@ -9,6 +9,7 @@ services:
       POSTGRES_DB: strader_db
     volumes:
       - timescaledb-data:/var/lib/postgresql/data
+      - ./init-db:/docker-entrypoint-initdb.d
     ports:
       - "5432:5432"
     healthcheck:
@@ -67,8 +68,8 @@ services:
     environment:
       - DB_HOST=db
       - DB_NAME=strader_test_db # Use a separate database for testing
-      - DB_USER=strader_user
-      - DB_PASSWORD=my-secret-pw
+      - DB_USER=test_user
+      - DB_PASSWORD=test_pw
       - DB_PORT=5432
     command: ["python", "-m", "pytest"]
 
