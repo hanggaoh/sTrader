@@ -100,7 +100,7 @@ def evaluate_classification(model, loader, device, logger, log_report: bool = Fa
     avg_loss = total_loss / len(all_labels)
     return avg_loss, accuracy, f1
 
-def train_loop(cfg: Config, df: pd.DataFrame, feats: List[str], logger):
+def train_loop(cfg: Config, df: pd.DataFrame, feats: List[str], logger, model: nn.Module = None):
     device = torch.device(cfg.device)
     logger.info(f"Using device: {device}")
 
@@ -151,7 +151,9 @@ def train_loop(cfg: Config, df: pd.DataFrame, feats: List[str], logger):
     else:
         class_weights = None
 
-    model = LSTMClassifier(len(feats), cfg.hidden_size, cfg.num_layers, cfg.dropout, cfg.bidirectional).to(device)
+    if model is None:
+        model = LSTMClassifier(len(feats), cfg.hidden_size, cfg.num_layers, cfg.dropout, cfg.bidirectional).to(device)
+
     criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=cfg.label_smoothing)
     opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     scheduler = ReduceLROnPlateau(opt, mode='max', factor=0.2, patience=3, verbose=True)
