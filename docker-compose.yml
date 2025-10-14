@@ -62,9 +62,6 @@ services:
     build:
       context: ./stock-data-backend
       target: test
-    depends_on:
-      db-backup:
-        condition: service_completed_successfully
     environment:
       - DB_HOST=db
       - DB_NAME=strader_test_db # Use a separate database for testing
