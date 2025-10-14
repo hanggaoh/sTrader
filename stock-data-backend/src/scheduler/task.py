@@ -14,6 +14,7 @@ from data.storage import Storage
 from data.eastmoney_fetcher import EastmoneyFetcher
 from scheduler.tasks.price_fetch import PriceFetchTask
 from scheduler.tasks.news_fetch import NewsFetchTask
+from scheduler.tasks.sentiment_analysis import SentimentAnalysisTask
 
 log = logging.getLogger(__name__)
 
@@ -26,7 +27,7 @@ class TaskScheduler:
             'repair_executor': ThreadPoolExecutor(max_workers=1)
         }
         job_defaults = {'misfire_grace_time': 10800}
-        self.scheduler = BackgroundScheduler(executors=executors, job_defaults=job_defaults)
+        self.scheduler = BackgroundScheduler(executors=executors, job_defaults=job_defaults, timezone='Asia/Shanghai')
         self.fetcher = StockDataFetcher()
         self.storage = Storage(config=config)
         self.eastmoney_fetcher = EastmoneyFetcher()
@@ -90,12 +91,16 @@ class TaskScheduler:
 
         price_task = PriceFetchTask(self.scheduler, self.storage, self.fetcher, stock_symbols, days=5)
         news_task = NewsFetchTask(self.scheduler, self.storage, stock_list)
+        sentiment_task = SentimentAnalysisTask(self.scheduler, self.storage)
 
-        self.scheduler.add_job(price_task.run, 'cron', hour=4, minute=0, id="master_price_job", replace_existing=True, executor='cron_executor')
+        self.scheduler.add_job(price_task.run, 'cron', hour=15, minute=30, id="master_price_job", replace_existing=True, executor='cron_executor')
         log.info(f"Scheduled daily price fetch job for {len(stock_list)} stocks.")
 
-        self.scheduler.add_job(news_task.run, 'cron', hour=5, minute=0, id="master_news_fetch_job", replace_existing=True, executor='cron_executor')
+        self.scheduler.add_job(news_task.run, 'cron', hour=16, minute=0, id="master_news_fetch_job", replace_existing=True, executor='cron_executor')
         log.info(f"Scheduled daily news fetch job for {len(stock_list)} stocks.")
+
+        self.scheduler.add_job(sentiment_task.run, 'interval', minutes=10, id="sentiment_analysis_job", replace_existing=True, executor='default')
+        log.info("Scheduled sentiment analysis job to run every 10 minutes.")
 
     def run_daily_fetch_now(self, days=5):
         stock_list = self._get_stock_list()
