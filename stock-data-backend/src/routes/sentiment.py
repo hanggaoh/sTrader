@@ -1,5 +1,5 @@
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from flask import Blueprint, jsonify, request
 
 from config import Config
@@ -7,7 +7,7 @@ from data.sentiment import analyze_sentiment
 from data.storage import Storage
 
 log = logging.getLogger(__name__)
-sentiment_bp = Blueprint('sentiment_bp', __name__, url_prefix='/sentiment')
+sentiment_bp = Blueprint('sentiment_bp', __name__)
 
 
 @sentiment_bp.route('/backfill', methods=['POST'])
@@ -40,7 +40,8 @@ def run_sentiment_analysis_backfill():
         results = []
         processed_count = 0
 
-        with ThreadPoolExecutor(max_workers=4) as executor:
+        # Use ProcessPoolExecutor for CPU-bound sentiment analysis
+        with ProcessPoolExecutor(max_workers=4) as executor:
             future_to_article = {executor.submit(analyze_sentiment, article[1], article[2]): article for article in pending_articles}
             
             for future in as_completed(future_to_article):

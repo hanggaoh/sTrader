@@ -40,6 +40,12 @@ def build_features(df: pd.DataFrame, cfg: Config) -> Tuple[pd.DataFrame, List[st
     log.info("Building features...")
     df = df.copy()
 
+    # --- Sentiment Features ---
+    # We assume the 'sentiment' column has been merged in the calling function
+    df['sentiment_3d_avg'] = df.groupby('symbol')['sentiment'].transform(lambda s: s.rolling(3).mean())
+    df['sentiment_7d_avg'] = df.groupby('symbol')['sentiment'].transform(lambda s: s.rolling(7).mean())
+    df['sentiment_momentum'] = df.groupby('symbol')['sentiment'].diff()
+
     # --- Trend Indicators ---
     df['sma_5'] = df.groupby('symbol')['close'].transform(lambda s: s.rolling(5).mean())
     df['sma_10'] = df.groupby('symbol')['close'].transform(lambda s: s.rolling(10).mean())
@@ -116,7 +122,7 @@ def build_features(df: pd.DataFrame, cfg: Config) -> Tuple[pd.DataFrame, List[st
         # Price & Volume
         'open', 'high', 'low', 'close', 'volume', 
         # Sentiment
-        'sentiment', 
+        'sentiment', 'sentiment_3d_avg', 'sentiment_7d_avg', 'sentiment_momentum',
         # Trend
         'sma_5', 'sma_10', 'sma_20', 'sma_50', 'ema_20', 
         'macd', 'macd_signal', 'macd_hist',

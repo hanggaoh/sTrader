@@ -6,13 +6,12 @@ import time
 from datetime import date, timedelta
 from typing import List, Dict
 
-from apscheduler.executors.pool import ThreadPoolExecutor
+from apscheduler.executors.pool import ThreadPoolExecutor, ProcessPoolExecutor
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from config import config
 from data.fetcher import StockDataFetcher
 from data.storage import Storage
-from data.news_api import fetch_news_for_symbol
 from data.sentiment import analyze_sentiment
 from ml.preprocessor import calculate_and_store_features
 from data.eastmoney_fetcher import EastmoneyFetcher
@@ -22,8 +21,8 @@ log = logging.getLogger(__name__)
 class TaskScheduler:
     def __init__(self):
         executors = {
-            'cron_executor': ThreadPoolExecutor(max_workers=3),
-            'default': ThreadPoolExecutor(max_workers=2),
+            'io_executor': ThreadPoolExecutor(max_workers=5),      # For I/O-bound tasks (network, disk)
+            'cpu_executor': ProcessPoolExecutor(max_workers=4),     # For CPU-bound tasks (computation)
             'backfill_executor': ThreadPoolExecutor(max_workers=4),
             'repair_executor': ThreadPoolExecutor(max_workers=1)
         }
@@ -88,16 +87,17 @@ class TaskScheduler:
             log.warning("No stocks found, skipping all daily task scheduling.")
             return
 
-        self.scheduler.add_job(self._run_daily_fetch_loop, 'cron', hour=4, minute=0, args=[[s['symbol'] for s in stock_list], 5], id="master_price_job", replace_existing=True, executor='cron_executor')
+        # Assign tasks to the appropriate executor
+        self.scheduler.add_job(self._run_daily_fetch_loop, 'cron', hour=4, minute=0, args=[[s['symbol'] for s in stock_list], 5], id="master_price_job", replace_existing=True, executor='io_executor')
         log.info(f"Scheduled daily price fetch job for {len(stock_list)} stocks.")
 
-        self.scheduler.add_job(self._run_daily_feature_calculation, 'cron', hour=4, minute=30, id="master_feature_job", replace_existing=True, executor='cron_executor')
+        self.scheduler.add_job(self._run_daily_feature_calculation, 'cron', hour=4, minute=30, id="master_feature_job", replace_existing=True, executor='cpu_executor')
         log.info("Scheduled daily feature calculation job.")
 
-        self.scheduler.add_job(self._run_daily_news_fetch_loop, 'cron', hour=5, minute=0, args=[stock_list], id="master_news_fetch_job", replace_existing=True, executor='cron_executor')
+        self.scheduler.add_job(self._run_daily_news_fetch_loop, 'cron', hour=5, minute=0, args=[stock_list], id="master_news_fetch_job", replace_existing=True, executor='io_executor')
         log.info(f"Scheduled daily news fetch job for {len(stock_list)} stocks.")
 
-        self.scheduler.add_job(self._run_sentiment_analysis_loop, 'cron', hour=5, minute=15, id="master_sentiment_analysis_job", replace_existing=True, executor='cron_executor')
+        self.scheduler.add_job(self._run_sentiment_analysis_loop, 'cron', hour=5, minute=15, id="master_sentiment_analysis_job", replace_existing=True, executor='cpu_executor')
         log.info("Scheduled sentiment analysis job.")
 
     def _run_daily_feature_calculation(self):
@@ -111,37 +111,31 @@ class TaskScheduler:
         log.info("Daily feature calculation job finished.")
 
     def _run_daily_news_fetch_loop(self, stock_list: List[Dict[str, str]]):
-        log.info(f"Starting master news fetch job for {len(stock_list)} stocks.")
+        log.info(f"Starting daily news fetch job for {len(stock_list)} stocks using Eastmoney API.")
+        end_date = date.today()
+        start_date = end_date - timedelta(days=1)
+
         for i, stock in enumerate(stock_list):
             if (i + 1) % 50 == 0:
-                log.info(f"News fetch progress: {i + 1}/{len(stock_list)} stocks processed.")
+                log.info(f"Daily news fetch progress: {i + 1}/{len(stock_list)} stocks processed.")
+            
             try:
-                articles = fetch_news_for_symbol(stock['symbol'], stock['name'])
-                if articles:
-                    # Deduplicate articles by headline before storing
-                    seen_headlines = set()
-                    unique_articles = []
-                    for article in articles:
-                        headline = article.get('title')
-                        if headline and headline not in seen_headlines:
-                            unique_articles.append(article)
-                            seen_headlines.add(headline)
-
-                    if len(articles) > len(unique_articles):
-                        log.info(f"Removed {len(articles) - len(unique_articles)} duplicate articles for symbol {stock['symbol']}.")
-
-                    if unique_articles:
-                        records_to_store = [(a['publishedAt'], stock['symbol'], a['title'], a.get('url'), a.get('content')) for a in unique_articles if a.get('content')]
+                news_df = self.eastmoney_fetcher.fetch_news_for_symbol(stock['symbol'], start_date.isoformat(), end_date.isoformat())
+                if not news_df.empty:
+                    records_to_store = []
+                    for _, row in news_df.iterrows():
+                        records_to_store.append((row['datetime'], stock['symbol'], row['title'], row['url'], row['content']))
+                    
+                    if records_to_store:
                         self.storage.store_raw_news(records_to_store)
-                
-                # Sleep to respect NewsAPI's rate limit on the developer plan.
-                sleep_duration = random.uniform(10.0, 15.0)
-                log.info(f"Sleeping for {sleep_duration:.2f} seconds to respect API rate limit.")
-                time.sleep(sleep_duration)
+                        log.info(f"Stored {len(records_to_store)} news articles for {stock['symbol']} from Eastmoney.")
+                else:
+                    log.info(f"No news found for {stock['symbol']} in the last day from Eastmoney.")
 
             except Exception as e:
-                log.error(f"Error fetching news for {stock['symbol']} ({stock['name']}): {e}", exc_info=True)
-        log.info("Master news fetch job complete.")
+                log.error(f"Error fetching daily news for {stock['symbol']} ({stock['name']}): {e}", exc_info=True)
+        
+        log.info("Daily news fetch job complete.")
 
     def _run_sentiment_analysis_loop(self):
         log.info("Starting sentiment analysis job.")
@@ -152,8 +146,8 @@ class TaskScheduler:
                 return
             log.info(f"Found {len(pending_articles)} pending articles to analyze.")
             results = []
-            for article_id, headline in pending_articles:
-                score = analyze_sentiment(headline)
+            for article_id, headline, content in pending_articles:
+                score = analyze_sentiment(headline, content)
                 if score is not None:
                     results.append((score, article_id))
             if results:
