@@ -254,21 +254,49 @@ class Storage:
 
     def query_features_for_symbols(self, stock_symbols: list[str]) -> pd.DataFrame:
         """
-        Queries the database for all features for a given list of stock symbols.
+        Queries the database for all features for a given list of stock symbols,
+        and joins with aggregated daily sentiment scores.
         """
         if not stock_symbols:
             return pd.DataFrame()
 
         log.info(f"Querying features for {len(stock_symbols)} symbols...")
-        query = "SELECT * FROM stock_features WHERE stock_symbol = ANY(%s);"
+        query = """
+            SELECT
+                sf.*,
+                agg_sent.avg_sentiment
+            FROM
+                stock_features sf
+            LEFT JOIN
+                (
+                    SELECT
+                        stock_symbol,
+                        date_trunc('day', published_at) as day,
+                        AVG(sentiment_score) as avg_sentiment
+                    FROM
+                        news_sentiment
+                    WHERE stock_symbol = ANY(%s)
+                    GROUP BY
+                        stock_symbol,
+                        day
+                ) as agg_sent
+            ON
+                sf.stock_symbol = agg_sent.stock_symbol AND date_trunc('day', sf.time) = agg_sent.day
+            WHERE
+                sf.stock_symbol = ANY(%s);
+        """
         
         with self.pool.connection() as conn:
             with conn.cursor() as cursor:
-                cursor.execute(query, (stock_symbols,))
+                cursor.execute(query, (stock_symbols, stock_symbols))
                 
                 column_names = [desc[0] for desc in cursor.description]
                 data = cursor.fetchall()
                 df = pd.DataFrame(data, columns=column_names)
+
+                if 'avg_sentiment' in df.columns:
+                    df['sentiment'] = df['avg_sentiment'].fillna(0)
+                    df = df.drop(columns=['avg_sentiment'])
                 
                 log.info(f"Retrieved {len(df)} feature rows for {len(stock_symbols)} symbols.")
                 return df

@@ -3,18 +3,18 @@ import logging
 import os
 import random
 import time
-from datetime import date, timedelta
 from typing import List, Dict
 
 from apscheduler.executors.pool import ThreadPoolExecutor, ProcessPoolExecutor
 from apscheduler.schedulers.background import BackgroundScheduler
+from scheduler.tasks.news_fetch import NewsFetchTask
+from scheduler.tasks.price_fetch import PriceFetchTask
+from scheduler.tasks.sentiment_analysis import SentimentAnalysisTask
 
 from config import config
+from data.eastmoney_fetcher import EastmoneyFetcher
 from data.fetcher import StockDataFetcher
 from data.storage import Storage
-from data.sentiment import analyze_sentiment
-from ml.preprocessor import calculate_and_store_features
-from data.eastmoney_fetcher import EastmoneyFetcher
 
 log = logging.getLogger(__name__)
 
@@ -27,7 +27,7 @@ class TaskScheduler:
             'repair_executor': ThreadPoolExecutor(max_workers=1)
         }
         job_defaults = {'misfire_grace_time': 10800}
-        self.scheduler = BackgroundScheduler(executors=executors, job_defaults=job_defaults)
+        self.scheduler = BackgroundScheduler(executors=executors, job_defaults=job_defaults, timezone='Asia/Shanghai')
         self.fetcher = StockDataFetcher()
         self.storage = Storage(config=config)
         self.eastmoney_fetcher = EastmoneyFetcher()
@@ -87,130 +87,98 @@ class TaskScheduler:
             log.warning("No stocks found, skipping all daily task scheduling.")
             return
 
-        # Assign tasks to the appropriate executor
-        self.scheduler.add_job(self._run_daily_fetch_loop, 'cron', hour=4, minute=0, args=[[s['symbol'] for s in stock_list], 5], id="master_price_job", replace_existing=True, executor='io_executor')
+        stock_symbols = [s['symbol'] for s in stock_list]
+
+        price_task = PriceFetchTask(self.scheduler, self.storage, self.fetcher, stock_symbols, days=5)
+        news_task = NewsFetchTask(self.scheduler, self.storage, stock_list)
+        sentiment_task = SentimentAnalysisTask(self.scheduler, self.storage)
+
+        self.scheduler.add_job(price_task.run, 'cron', hour=15, minute=30, id="master_price_job", replace_existing=True, executor='cpu_executor')
         log.info(f"Scheduled daily price fetch job for {len(stock_list)} stocks.")
 
-        self.scheduler.add_job(self._run_daily_feature_calculation, 'cron', hour=4, minute=30, id="master_feature_job", replace_existing=True, executor='cpu_executor')
-        log.info("Scheduled daily feature calculation job.")
-
-        self.scheduler.add_job(self._run_daily_news_fetch_loop, 'cron', hour=5, minute=0, args=[stock_list], id="master_news_fetch_job", replace_existing=True, executor='io_executor')
+        self.scheduler.add_job(news_task.run, 'cron', hour=16, minute=0, id="master_news_fetch_job", replace_existing=True, executor='io_executor')
         log.info(f"Scheduled daily news fetch job for {len(stock_list)} stocks.")
 
-        self.scheduler.add_job(self._run_sentiment_analysis_loop, 'cron', hour=5, minute=15, id="master_sentiment_analysis_job", replace_existing=True, executor='cpu_executor')
-        log.info("Scheduled sentiment analysis job.")
-
-    def _run_daily_feature_calculation(self):
-        log.info("Starting daily feature calculation job.")
-        try:
-            end_date = date.today()
-            start_date = end_date - timedelta(days=90)
-            calculate_and_store_features(self.storage, start_date.isoformat(), end_date.isoformat())
-        except Exception as e:
-            log.error(f"An error occurred during the daily feature calculation job: {e}", exc_info=True)
-        log.info("Daily feature calculation job finished.")
-
-    def _run_daily_news_fetch_loop(self, stock_list: List[Dict[str, str]]):
-        log.info(f"Starting daily news fetch job for {len(stock_list)} stocks using Eastmoney API.")
-        end_date = date.today()
-        start_date = end_date - timedelta(days=1)
-
-        for i, stock in enumerate(stock_list):
-            if (i + 1) % 50 == 0:
-                log.info(f"Daily news fetch progress: {i + 1}/{len(stock_list)} stocks processed.")
-            
-            try:
-                news_df = self.eastmoney_fetcher.fetch_news_for_symbol(stock['symbol'], start_date.isoformat(), end_date.isoformat())
-                if not news_df.empty:
-                    records_to_store = []
-                    for _, row in news_df.iterrows():
-                        records_to_store.append((row['datetime'], stock['symbol'], row['title'], row['url'], row['content']))
-                    
-                    if records_to_store:
-                        self.storage.store_raw_news(records_to_store)
-                        log.info(f"Stored {len(records_to_store)} news articles for {stock['symbol']} from Eastmoney.")
-                else:
-                    log.info(f"No news found for {stock['symbol']} in the last day from Eastmoney.")
-
-            except Exception as e:
-                log.error(f"Error fetching daily news for {stock['symbol']} ({stock['name']}): {e}", exc_info=True)
-        
-        log.info("Daily news fetch job complete.")
-
-    def _run_sentiment_analysis_loop(self):
-        log.info("Starting sentiment analysis job.")
-        try:
-            pending_articles = self.storage.get_pending_sentiment_articles(limit=500)
-            if not pending_articles:
-                log.info("No pending articles to analyze.")
-                return
-            log.info(f"Found {len(pending_articles)} pending articles to analyze.")
-            results = []
-            for article_id, headline, content in pending_articles:
-                score = analyze_sentiment(headline, content)
-                if score is not None:
-                    results.append((score, article_id))
-            if results:
-                self.storage.update_sentiment_scores(results)
-                log.info(f"Successfully analyzed and updated {len(results)} articles.")
-        except Exception as e:
-            log.error(f"An error occurred during the sentiment analysis loop: {e}", exc_info=True)
-        log.info("Sentiment analysis job complete.")
+        self.scheduler.add_job(sentiment_task.run, 'interval', minutes=10, id="sentiment_analysis_job", replace_existing=True, executor='cpu_executor')
+        log.info("Scheduled sentiment analysis job to run every 10 minutes.")
 
     def run_daily_fetch_now(self, days=5):
         stock_list = self._get_stock_list()
         if not stock_list:
             return 0
+
+        stock_symbols = [s['symbol'] for s in stock_list]
+        price_task = PriceFetchTask(self.scheduler, self.storage, self.fetcher, stock_symbols, days=days)
+
         log.info("Scheduling an immediate one-time run of the daily fetch job.")
-        self.scheduler.add_job(self._run_daily_fetch_loop, args=[[s['symbol'] for s in stock_list], days], id="immediate_daily_fetch", replace_existing=True)
+        self.scheduler.add_job(price_task.run, id="immediate_daily_fetch", replace_existing=True)
         return len(stock_list)
 
     def fetch_single_stock_now(self, symbol: str, days: int = 5):
         log.info(f"Scheduling an immediate one-time fetch for {symbol} for the last {days} days.")
         period_str = f"{days}d"
         job_id = f"fetch_single_{symbol}_{int(time.time())}"
-        self.scheduler.add_job(self._fetch_and_store_price, args=[symbol, period_str, "single-fetch"], id=job_id, replace_existing=False, executor='repair_executor')
+        price_task = PriceFetchTask(self.scheduler, self.storage, self.fetcher, days=days)
+        self.scheduler.add_job(price_task._fetch_and_store_price, args=[symbol, period_str, "single-fetch"], id=job_id, replace_existing=False, executor='repair_executor')
 
     def schedule_backfill_tasks(self):
         stock_list = self._get_stock_list_from_json()
         if not stock_list:
             return 0
-        self.scheduler.add_job(self._run_full_backfill_loop, args=[stock_list], id="master_backfill_job", replace_existing=True, executor='backfill_executor')
+        price_task = PriceFetchTask(self.scheduler, self.storage, self.fetcher, stock_symbols=self._get_stock_list(), days=365 * 30)
+        self.scheduler.add_job(price_task.run, args=[stock_list], id="scheduled_backfill_job", replace_existing=True, executor='backfill_executor')
         log.info(f"Scheduled a single backfill job for {len(stock_list)} stocks.")
         return len(stock_list)
 
     def schedule_full_news_backfill_for_all_symbols(self, skip_existing: bool = False):
         """
-        Schedules a news backfill job for all symbols in the stock_data table,
-        using the date range of the available price data for each symbol.
+        Schedules a single news backfill job for all symbols, iterating through them
+        in a memory-efficient way.
+        """
+        log.info("Scheduling a single, comprehensive news backfill job.")
+
+        # This function will now run in the background via the scheduler
+        self.scheduler.add_job(
+            self._run_full_news_backfill_loop,
+            args=[skip_existing],
+            id="master_news_backfill_job",
+            replace_existing=True,
+            executor='backfill_executor'
+        )
+
+        log.info("Master news backfill job has been scheduled.")
+        # We can't return a precise count anymore as it runs in the background
+        return "Job Scheduled"
+
+    def _run_full_news_backfill_loop(self, skip_existing: bool):
+        """
+        The actual job that iterates through all symbols and triggers their
+        news backfill.
         """
         log.info("Starting full news backfill for all symbols based on stock data date ranges.")
         symbol_date_ranges = self.storage.get_stock_data_date_ranges()
         if not symbol_date_ranges:
-            log.warning("No stock data found in the database. Cannot schedule news backfill.")
-            return 0
+            log.warning("No stock data found in the database. Cannot perform news backfill.")
+            return
 
         log.info(f"Found {len(symbol_date_ranges)} symbols with date ranges to backfill news for.")
-        scheduled_count = 0
-        for symbol, start_date, end_date in symbol_date_ranges:
+
+        for i, (symbol, start_date, end_date) in enumerate(symbol_date_ranges):
+            if (i + 1) % 100 == 0:
+                log.info(f"News backfill progress: {i + 1}/{len(symbol_date_ranges)} symbols processed.")
+
             if start_date and end_date:
                 if skip_existing and self.storage.has_news_for_symbol(symbol):
                     log.info(f"Skipping news backfill for {symbol} as it already has news.")
                     continue
 
-                job_id = f"news_backfill_for_{symbol}"
-                self.scheduler.add_job(
-                    self._run_eastmoney_news_backfill,
-                    args=[symbol, start_date.isoformat(), end_date.isoformat()],
-                    id=job_id,
-                    replace_existing=True,
-                    executor='backfill_executor'
-                )
-                log.info(f"Scheduled news backfill for {symbol} from {start_date} to {end_date}.")
-                scheduled_count += 1
+                # Directly call the backfill logic instead of creating a new job
+                self._run_eastmoney_news_backfill(symbol, start_date.isoformat(), end_date.isoformat())
+
+                # Add a small delay to avoid overwhelming the system
+                time.sleep(random.uniform(0.5, 1.5))
         
-        log.info(f"Completed scheduling. A total of {scheduled_count} news backfill jobs were scheduled.")
-        return scheduled_count
+        log.info("Completed the master news backfill job for all symbols.")
 
     def schedule_insufficient_news_backfill(self, threshold: int):
         """

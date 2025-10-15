@@ -3,5 +3,8 @@
         "stock-data-backend"
     ],
     "python.testing.unittestEnabled": false,
-    "python.testing.pytestEnabled": true
+    "python.testing.pytestEnabled": true,
+    "python.analysis.extraPaths": [
+        "./stock-data-backend/src"
+    ]
 }
