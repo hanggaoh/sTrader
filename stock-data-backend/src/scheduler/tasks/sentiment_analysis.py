@@ -1,12 +1,15 @@
 import logging
 
-from scheduler.tasks.base_task import ScheduledTask
+from data.storage import Storage
 from data.sentiment import analyze_sentiment
 
 log = logging.getLogger(__name__)
 
 
-class SentimentAnalysisTask(ScheduledTask):
+class SentimentAnalysisTask:
+    def __init__(self, storage: Storage):
+        self.storage = storage
+
     def run(self):
         log.info("Starting sentiment analysis job.")
         try:
@@ -16,8 +19,8 @@ class SentimentAnalysisTask(ScheduledTask):
                 return
             log.info(f"Found {len(pending_articles)} pending articles to analyze.")
             results = []
-            for article_id, headline in pending_articles:
-                score = analyze_sentiment(headline)
+            for article_id, headline, content in pending_articles:
+                score = analyze_sentiment(headline, content)
                 if score is not None:
                     results.append((score, article_id))
             if results:

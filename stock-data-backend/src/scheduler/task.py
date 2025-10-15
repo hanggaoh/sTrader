@@ -91,7 +91,7 @@ class TaskScheduler:
 
         price_task = PriceFetchTask(self.scheduler, self.storage, self.fetcher, stock_symbols, days=5)
         news_task = NewsFetchTask(self.scheduler, self.storage, stock_list)
-        sentiment_task = SentimentAnalysisTask(self.scheduler, self.storage)
+        sentiment_task = SentimentAnalysisTask(self.storage)
 
         self.scheduler.add_job(price_task.run, 'cron', hour=15, minute=30, id="master_price_job", replace_existing=True, executor='cpu_executor')
         log.info(f"Scheduled daily price fetch job for {len(stock_list)} stocks.")

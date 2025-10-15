@@ -40,7 +40,7 @@ def test_news_fetch_triggers_sentiment_analysis():
     # Check the keyword arguments for the job
     assert call_kwargs['id'] == 'immediate_sentiment_analysis'
     assert call_kwargs['replace_existing'] is True
-    assert call_kwargs['executor'] == 'cron_executor'
+    assert call_kwargs['executor'] == 'cpu_executor'
 
 
 def test_price_fetch_triggers_feature_calculation():

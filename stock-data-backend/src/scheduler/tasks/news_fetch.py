@@ -52,5 +52,5 @@ class NewsFetchTask(ScheduledTask):
         log.info("Master news fetch job complete.")
 
         log.info("News fetch finished, triggering sentiment analysis.")
-        sentiment_task = SentimentAnalysisTask(self.scheduler, self.storage)
-        self.scheduler.add_job(sentiment_task.run, id="immediate_sentiment_analysis", replace_existing=True, executor='cron_executor')
+        sentiment_task = SentimentAnalysisTask(self.storage)
+        self.scheduler.add_job(sentiment_task.run, id="immediate_sentiment_analysis", replace_existing=True, executor='cpu_executor')
