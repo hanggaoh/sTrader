@@ -7,7 +7,7 @@ from data.sentiment import analyze_sentiment
 from data.storage import Storage
 
 log = logging.getLogger(__name__)
-sentiment_bp = Blueprint('sentiment_bp', __name__)
+sentiment_bp = Blueprint('sentiment_bp', __name__, url_prefix="/sentiment")
 
 
 @sentiment_bp.route('/backfill', methods=['POST'])
@@ -40,6 +40,7 @@ def run_sentiment_analysis_backfill():
         results = []
         processed_count = 0
 
+        log.info(f"Starting sentiment analysis for {total_articles} articles...")
         # Use ProcessPoolExecutor for CPU-bound sentiment analysis
         with ProcessPoolExecutor(max_workers=4) as executor:
             future_to_article = {executor.submit(analyze_sentiment, article[1], article[2]): article for article in pending_articles}
@@ -51,13 +52,15 @@ def run_sentiment_analysis_backfill():
                     results.append((score, article[0]))
                     processed_count += 1
 
-                    if processed_count % 500 == 0:
+                    if processed_count % 100 == 0:
                         log.info(f"Sentiment analysis progress: {processed_count}/{total_articles} articles processed.")
 
                 except Exception as exc:
                     log.error(f'Article ID {article[0]} generated an exception: {exc}')
 
+        log.info("Sentiment analysis processing finished.")
         if results:
+            log.info(f"Updating database with {len(results)} new sentiment scores...")
             storage.update_sentiment_scores(results)
             log.info(f"Successfully updated sentiment scores for {len(results)} articles.")
 
