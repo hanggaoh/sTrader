@@ -3,19 +3,15 @@ import random
 import time
 from typing import List
 
-from apscheduler.schedulers.background import BackgroundScheduler
-
-from scheduler.tasks.base_task import ScheduledTask
 from data.fetcher import StockDataFetcher
 from data.storage import Storage
-from scheduler.tasks.feature_calculation import FeatureCalculationTask
 
 log = logging.getLogger(__name__)
 
 
-class PriceFetchTask(ScheduledTask):
-    def __init__(self, scheduler: BackgroundScheduler, storage: Storage, fetcher: StockDataFetcher, stock_symbols: List[str], days: int = 5):
-        super().__init__(scheduler, storage)
+class PriceFetchTask:
+    def __init__(self, storage: Storage, fetcher: StockDataFetcher, stock_symbols: List[str], days: int = 5):
+        self.storage = storage
         self.fetcher = fetcher
         self.stock_symbols = stock_symbols
         self.days = days
@@ -29,11 +25,6 @@ class PriceFetchTask(ScheduledTask):
                 log.info(f"Daily price fetch progress: {i + 1}/{total_symbols} symbols processed.")
             self._fetch_and_store_price(symbol, period=period_str, job_type="daily")
         log.info(f"Master daily price fetch job completed for all {total_symbols} symbols.")
-
-        # Now, trigger the feature calculation job.
-        log.info("Daily fetch finished, triggering feature calculation.")
-        feature_task = FeatureCalculationTask(self.scheduler, self.storage)
-        self.scheduler.add_job(feature_task.run, id="immediate_feature_calculation", replace_existing=True, executor='cron_executor')
 
     def _fetch_and_store_price(self, symbol: str, period: str, job_type: str):
         log.info(f"Running {job_type} job for symbol: {symbol}")

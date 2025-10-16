@@ -100,11 +100,9 @@ def build_features(df: pd.DataFrame, cfg: Config) -> Tuple[pd.DataFrame, List[st
 
     # --- Target Variable (Classification) ---
     # Target is 1 if the price goes up in the next `horizon` periods, 0 otherwise.
-    # We must handle the NaN from the shift at the end of the series explicitly.
     next_close = df.groupby('symbol')['close'].shift(-cfg.horizon)
-    df['target'] = (next_close > df['close'])
-    # Where the next close is not available, the target is undefined (NaN).
-    df.loc[next_close.isna(), 'target'] = np.nan
+    # Use np.where to handle boolean logic and NaN assignment in one step.
+    df['target'] = np.where(next_close.isna(), np.nan, (next_close > df['close']))
     # Use a nullable integer type to preserve NaNs.
     df['target'] = df['target'].astype(pd.Int64Dtype())
     
@@ -178,7 +176,8 @@ def calculate_and_store_features(storage: Storage, start_date: str, end_date: st
     daily_sentiment_df = _calculate_daily_sentiment(storage, start_date, end_date)
     if not daily_sentiment_df.empty:
         raw_df = pd.merge(raw_df, daily_sentiment_df, on=['date', 'symbol'], how='left')
-        raw_df['sentiment'].fillna(0.0, inplace=True) # Fill missing sentiment with neutral
+        # FIX: Use direct assignment instead of inplace on a chained selection.
+        raw_df['sentiment'] = raw_df['sentiment'].fillna(0.0) # Fill missing sentiment with neutral
     else:
         raw_df['sentiment'] = 0.0 # If no sentiment data, default to neutral
 

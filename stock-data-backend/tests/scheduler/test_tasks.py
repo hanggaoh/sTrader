@@ -2,14 +2,11 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 
 from scheduler.tasks.news_fetch import NewsFetchTask
-from scheduler.tasks.sentiment_analysis import SentimentAnalysisTask
 from scheduler.tasks.price_fetch import PriceFetchTask
-from scheduler.tasks.feature_calculation import FeatureCalculationTask
 
 
-def test_news_fetch_triggers_sentiment_analysis():
+def test_news_fetch_task_fetches_and_stores_data():
     # 1. Create mock objects for dependencies
-    mock_scheduler = MagicMock()
     mock_storage = MagicMock()
 
     # Mock the stock list that the task will use
@@ -17,7 +14,6 @@ def test_news_fetch_triggers_sentiment_analysis():
 
     # 2. Instantiate the task we are testing
     news_fetch_task = NewsFetchTask(
-        scheduler=mock_scheduler,
         storage=mock_storage,
         stock_list=stock_list
     )
@@ -29,30 +25,19 @@ def test_news_fetch_triggers_sentiment_analysis():
         # 3. Run the task's logic
         news_fetch_task.run()
 
-    # 4. Assert that the task called the scheduler to add the next job
-    assert mock_scheduler.add_job.call_count == 1
-    call_args, call_kwargs = mock_scheduler.add_job.call_args
-
-    # Check that the scheduled job is the `run` method of a SentimentAnalysisTask
-    assert isinstance(call_args[0].__self__, SentimentAnalysisTask)
-    assert call_args[0].__name__ == 'run'
-
-    # Check the keyword arguments for the job
-    assert call_kwargs['id'] == 'immediate_sentiment_analysis'
-    assert call_kwargs['replace_existing'] is True
-    assert call_kwargs['executor'] == 'cpu_executor'
+    # 4. Assert that the news was fetched and stored
+    assert mock_fetch_news.call_count == 1
+    assert mock_storage.store_raw_news.call_count == 1
 
 
-def test_price_fetch_triggers_feature_calculation():
+def test_price_fetch_task_fetches_and_stores_data():
     # 1. Create mock objects for dependencies
-    mock_scheduler = MagicMock()
     mock_storage = MagicMock()
     mock_fetcher = MagicMock()
     stock_symbols = ['AAPL', 'GOOG']
 
     # 2. Instantiate the task we are testing
     price_fetch_task = PriceFetchTask(
-        scheduler=mock_scheduler,
         storage=mock_storage,
         fetcher=mock_fetcher,
         stock_symbols=stock_symbols,
@@ -68,16 +53,3 @@ def test_price_fetch_triggers_feature_calculation():
     # 4. Assert that the fetcher and storage were called for each symbol
     assert mock_fetcher.fetch_historical_data.call_count == len(stock_symbols)
     assert mock_storage.store_historical_data.call_count == len(stock_symbols)
-
-    # 5. Assert that the task called the scheduler to add the next job
-    assert mock_scheduler.add_job.call_count == 1
-    call_args, call_kwargs = mock_scheduler.add_job.call_args
-
-    # Check that the scheduled job is the `run` method of a FeatureCalculationTask
-    assert isinstance(call_args[0].__self__, FeatureCalculationTask)
-    assert call_args[0].__name__ == 'run'
-
-    # Check the keyword arguments for the job
-    assert call_kwargs['id'] == 'immediate_feature_calculation'
-    assert call_kwargs['replace_existing'] is True
-    assert call_kwargs['executor'] == 'cron_executor'

@@ -1,4 +1,5 @@
 import logging
+from typing import Optional
 
 from config import config
 from data.storage import Storage
@@ -8,15 +9,21 @@ log = logging.getLogger(__name__)
 
 
 class SentimentAnalysisTask:
-    def __init__(self):
-        pass
+    def __init__(self, storage: Optional[Storage] = None):
+        self.storage = storage
 
     def run(self):
         log.info("Starting sentiment analysis job.")
-        storage = None
+        
+        storage_instance = self.storage
+        should_close_storage = False
+        if storage_instance is None:
+            log.info("No storage instance provided, creating a new one.")
+            storage_instance = Storage(config)
+            should_close_storage = True
+
         try:
-            storage = Storage(config)
-            pending_articles = storage.get_pending_sentiment_articles(limit=500)
+            pending_articles = storage_instance.get_pending_sentiment_articles(limit=500)
             if not pending_articles:
                 log.info("No pending articles to analyze.")
                 return
@@ -29,12 +36,12 @@ class SentimentAnalysisTask:
                     results.append((score, article_id))
             
             if results:
-                storage.update_sentiment_scores(results)
+                storage_instance.update_sentiment_scores(results)
                 log.info(f"Successfully analyzed and updated {len(results)} articles.")
 
         except Exception as e:
             log.error(f"An error occurred during the sentiment analysis loop: {e}", exc_info=True)
         finally:
-            if storage:
-                storage.close()
+            if should_close_storage and storage_instance:
+                storage_instance.close()
         log.info("Sentiment analysis job complete.")

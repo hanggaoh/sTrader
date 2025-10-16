@@ -3,19 +3,15 @@ import random
 import time
 from typing import List, Dict
 
-from apscheduler.schedulers.background import BackgroundScheduler
-
-from scheduler.tasks.base_task import ScheduledTask
 from data.storage import Storage
 from data.news_api import fetch_news_for_symbol
-from scheduler.tasks.sentiment_analysis import SentimentAnalysisTask
 
 log = logging.getLogger(__name__)
 
 
-class NewsFetchTask(ScheduledTask):
-    def __init__(self, scheduler: BackgroundScheduler, storage: Storage, stock_list: List[Dict[str, str]]):
-        super().__init__(scheduler, storage)
+class NewsFetchTask:
+    def __init__(self, storage: Storage, stock_list: List[Dict[str, str]]):
+        self.storage = storage
         self.stock_list = stock_list
 
     def run(self):
@@ -50,7 +46,3 @@ class NewsFetchTask(ScheduledTask):
             except Exception as e:
                 log.error(f"Error fetching news for {stock['symbol']} ({stock['name']}): {e}", exc_info=True)
         log.info("Master news fetch job complete.")
-
-        log.info("News fetch finished, triggering sentiment analysis.")
-        sentiment_task = SentimentAnalysisTask()
-        self.scheduler.add_job(sentiment_task.run, id="immediate_sentiment_analysis", replace_existing=True, executor='cpu_executor')
