@@ -3,6 +3,7 @@ services:
     image: timescale/timescaledb:latest-pg16
     container_name: timescaledb
     restart: always
+    command: ["postgres", "-c", "max_locks_per_transaction=256"]
     environment:
       POSTGRES_USER: strader_user
       POSTGRES_PASSWORD: my-secret-pw
@@ -63,6 +64,7 @@ services:
       context: ./stock-data-backend
       target: test
     environment:
+      - APP_ENV=test
       - DB_HOST=db
       - DB_NAME=strader_test_db # Use a separate database for testing
       - DB_USER=test_user

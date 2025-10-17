@@ -1,6 +1,7 @@
 import logging
 import atexit
 from datetime import date
+import os
 
 # --- Gunicorn Logger Integration ---
 if __name__ != "__main__":
@@ -155,7 +156,7 @@ def create_app(init_scheduler=True):
     
     return app
 
-app = create_app()
+app = create_app(init_scheduler=os.environ.get("APP_ENV") != "test")
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
