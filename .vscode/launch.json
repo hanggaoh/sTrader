@@ -1,0 +1,47 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: Train Phase 1",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/stock-data-backend/src/training/phase1_trainer.py",
+            "console": "integratedTerminal",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/stock-data-backend/src"
+            }
+        },
+        {
+            "name": "Python: Train Phase 2",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/stock-data-backend/src/training/phase2_trainer.py",
+            "console": "integratedTerminal",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/stock-data-backend/src"
+            },
+            "args": [
+                "--phase1-artifacts",
+                "${input:phase1_artifacts}"
+            ]
+        },
+        {
+            "name": "Python: Run current file",
+            "type": "python",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/stock-data-backend/src"
+            }
+        }
+    ],
+    "inputs": [
+        {
+            "id": "phase1_artifacts",
+            "type": "promptString",
+            "description": "Path to the artifacts directory from phase 1",
+            "default": "stock-data-backend/artifacts/<most_recent_run_id>"
+        }
+    ]
+}
