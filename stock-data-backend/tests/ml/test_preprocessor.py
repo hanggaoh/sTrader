@@ -374,3 +374,38 @@ def test_build_features_with_multiple_symbols():
     # --- Assertions ---
     assert features_a.iloc[0]['sma_5'] == pytest.approx(expected_sma_5_a)
     assert features_b.iloc[0]['sma_5'] == pytest.approx(expected_sma_5_b)
+
+def test_build_features_adx_stability():
+    """
+    Tests that the ADX calculation is stable and does not produce NaNs
+    when the price is flat, which would previously cause a division-by-zero error.
+    """
+    # 1. Setup: Create a DataFrame where the price is constant for a period.
+    # This will cause the TR, +DI, and -DI to be zero, testing the division-by-zero fix.
+    num_records = 60
+    # Prices increase for the first 30 days, then stay flat for the next 30.
+    close_prices = np.concatenate([np.arange(100, 130), np.full(30, 130)])
+    data = {
+        'symbol': ['TEST_ADX'] * num_records,
+        'timestamp': pd.to_datetime(pd.date_range(start='2023-01-01', periods=num_records, freq='D')),
+        'close': close_prices,
+        'open': close_prices,
+        'high': close_prices,
+        'low': close_prices,
+        'volume': [1000] * num_records,
+        'sentiment': [0.0] * num_records,
+    }
+    input_df = pd.DataFrame(data)
+
+    cfg = Config(horizon=1)
+
+    # 2. Action: Build the features.
+    features_df, _ = build_features(input_df.copy(), cfg)
+
+    # 3. Assert: The process should complete without errors, and ADX should not be NaN.
+    # The largest window is 50, so we expect some rows to be dropped.
+    # The key is that the DataFrame should not be *entirely* empty due to NaNs in ADX.
+    assert not features_df.empty, "DataFrame should not be empty after feature calculation."
+
+    # Check the 'adx' column specifically.
+    assert not features_df['adx'].isnull().any(), "ADX column should not contain any NaN values."

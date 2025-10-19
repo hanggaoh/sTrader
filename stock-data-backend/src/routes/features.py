@@ -77,7 +77,7 @@ def full_backfill_features():
             symbols = main_storage.get_all_distinct_symbols()
             log.info(f"Found {len(symbols)} symbols to backfill in parallel.")
 
-            with ThreadPoolExecutor(max_workers=4) as executor:
+            with ThreadPoolExecutor(max_workers=8) as executor:
                 results = list(executor.map(backfill_one_symbol_feature, symbols))
             
             successful_jobs = sum(1 for r in results if r[0])
