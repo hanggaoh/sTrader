@@ -79,29 +79,36 @@ class SequenceDataset(Dataset):
 @torch.no_grad()
 def evaluate_classification(model, loader, device, logger, log_report: bool = False):
     model.eval()
-    all_preds, all_labels, total_loss = [], [], 0.0
-    criterion = nn.CrossEntropyLoss() # To calculate validation loss
+    all_preds, all_labels, all_confidences, total_loss = [], [], [], 0.0
+    criterion = nn.CrossEntropyLoss()
 
     for xb, yb in loader:
         xb, yb = xb.to(device), yb.to(device)
         logits = model(xb)
         loss = criterion(logits, yb)
         total_loss += loss.item() * xb.size(0)
-        preds = torch.argmax(logits, dim=1)
+
+        # Convert logits to probabilities (confidence scores)
+        probs = torch.softmax(logits, dim=1)
+        confidences, preds = torch.max(probs, dim=1)
+
         all_preds.extend(preds.cpu().numpy())
         all_labels.extend(yb.cpu().numpy())
+        all_confidences.extend(confidences.cpu().numpy())
     
     accuracy = accuracy_score(all_labels, all_preds)
     f1 = f1_score(all_labels, all_preds, average='weighted')
+    avg_confidence = np.mean(all_confidences)
     
     if log_report:
         logger.info(f"Classification Report:\n{classification_report(all_labels, all_preds, target_names=['DOWN', 'UP'])}")
         logger.info(f"Confusion Matrix:\n{confusion_matrix(all_labels, all_preds)}")
+        logger.info(f"Average prediction confidence: {avg_confidence:.4f}")
 
     avg_loss = total_loss / len(all_labels)
-    return avg_loss, accuracy, f1
+    return avg_loss, accuracy, f1, avg_confidence
 
-def train_loop(cfg: Config, df: pd.DataFrame, feats: List[str], logger, model: nn.Module = None):
+def train_loop(cfg: Config, df: pd.DataFrame, feats: List[str], logger, model: nn.Module = None, debug_overfit: bool = False):
     device = torch.device(cfg.device)
     logger.info(f"Using device: {device}")
 
@@ -157,7 +164,33 @@ def train_loop(cfg: Config, df: pd.DataFrame, feats: List[str], logger, model: n
 
     criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=cfg.label_smoothing)
     opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
-    scheduler = ReduceLROnPlateau(opt, mode='max', factor=0.2, patience=3, verbose=True)
+    scheduler = ReduceLROnPlateau(opt, mode='max', factor=0.2, patience=3)
+
+    if debug_overfit:
+        logger.warning("--- RUNNING IN OVERFIT DEBUG MODE ---")
+        try:
+            xb, yb = next(iter(train_loader))
+        except StopIteration:
+            logger.error("Training loader is empty! Cannot run overfit test.")
+            return None, None, {}
+        
+        xb, yb = xb.to(device), yb.to(device)
+        logger.info(f"Attempting to overfit on a single batch of size: X={xb.shape}, y={yb.shape}")
+
+        model.train()
+        for i in range(100):
+            opt.zero_grad()
+            logits = model(xb)
+            loss = criterion(logits, yb)
+            loss.backward()
+            opt.step()
+            if (i + 1) % 10 == 0:
+                preds = torch.argmax(logits, dim=1)
+                acc = accuracy_score(yb.cpu().numpy(), preds.cpu().numpy())
+                logger.info(f"Overfit Iter {i+1:03d} | Loss={loss.item():.4f} | Accuracy={acc:.4f}")
+        
+        logger.warning("--- OVERFIT DEBUG MODE COMPLETE ---")
+        return None, None, {}
 
     best_val_acc, best_state, patience = 0.0, None, cfg.early_stopping_patience
 
@@ -177,8 +210,8 @@ def train_loop(cfg: Config, df: pd.DataFrame, feats: List[str], logger, model: n
             total_train_loss += loss.item()
         
         avg_train_loss = total_train_loss / len(train_loader)
-        val_loss, val_acc, val_f1 = evaluate_classification(model, val_loader, device, logger)
-        logger.info(f"Epoch {epoch:03d} | train_loss={avg_train_loss:.4f} | val_loss={val_loss:.4f} | val_accuracy={val_acc:.4f} | val_f1={val_f1:.4f}")
+        val_loss, val_acc, val_f1, val_conf = evaluate_classification(model, val_loader, device, logger)
+        logger.info(f"Epoch {epoch:03d} | train_loss={avg_train_loss:.4f} | val_loss={val_loss:.4f} | val_accuracy={val_acc:.4f} | val_f1={val_f1:.4f} | val_confidence={val_conf:.4f}")
 
         scheduler.step(val_acc)
 
@@ -192,10 +225,10 @@ def train_loop(cfg: Config, df: pd.DataFrame, feats: List[str], logger, model: n
     if best_state:
         model.load_state_dict(best_state)
     
-    test_loss, test_acc, test_f1 = evaluate_classification(model, test_loader, device, logger, log_report=True)
+    test_loss, test_acc, test_f1, test_conf = evaluate_classification(model, test_loader, device, logger, log_report=True)
     logger.info(f"Final Test Loss: {test_loss:.4f}")
-    logger.info(f"Final Test Accuracy: {test_acc:.4f} | Final Test F1-Score: {test_f1:.4f}")
-    return model, scaler, {"test_loss": test_loss, "test_accuracy": test_acc, "test_f1": test_f1}
+    logger.info(f"Final Test Accuracy: {test_acc:.4f} | Final Test F1-Score: {test_f1:.4f} | Final Test Confidence: {test_conf:.4f}")
+    return model, scaler, {"test_loss": test_loss, "test_accuracy": test_acc, "test_f1": test_f1, "test_confidence": test_conf}
 
 def prepare_data(cfg: Config, storage: Storage, logger) -> tuple[pd.DataFrame | None, list | None]:
     symbols_to_use = cfg.symbols
@@ -229,6 +262,10 @@ def prepare_data(cfg: Config, storage: Storage, logger) -> tuple[pd.DataFrame | 
         return None, None
 
     df['target'] = df['target'].astype(int)
+
+    # Log class distribution
+    class_dist = df['target'].value_counts(normalize=True)
+    logger.info(f"Target class distribution:\n{class_dist}")
 
     counts = df.groupby('symbol').size()
     keep_syms = counts[counts >= cfg.min_per_symbol_rows].index

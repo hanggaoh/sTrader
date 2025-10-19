@@ -11,13 +11,14 @@ from ml.utils import save_artifacts, prepare_data, train_loop
 def run_phase1(storage: Storage, logger: logging.Logger):
     logger.info("--- Starting Phase 1: Long-term training ---")
     phase1_cfg = Config(
-        window=120,  # Big window size
+        window=60,  # Reduced window size
         epochs=15,
-        train_sample_fraction=0.1,
+        train_sample_fraction=0.8, # Increased data sample
         horizon=5,
-        hidden_size=512,
-        num_layers=2,
-        lr=5e-4,
+        hidden_size=128, # Simplified model
+        num_layers=1, # Simplified model
+        lr=1e-4,
+        weight_decay=1e-2,
         batch_size=512,
         early_stopping_patience=7,
         label_smoothing=0.1,
@@ -29,15 +30,17 @@ def run_phase1(storage: Storage, logger: logging.Logger):
         logger.error("Data preparation for Phase 1 failed.")
         return
 
-    # Exclude sentiment for Phase 1
-    feats = [f for f in feats if f != 'sentiment']
+    # The 'sentiment' feature is now included to ensure model compatibility with Phase 2.
 
-    model, scaler, metrics = train_loop(phase1_cfg, df, feats, logger)
+    # --- Overfit Sanity Check ---
+    # Set debug_overfit=False to run the full training.
+    model, scaler, metrics = train_loop(phase1_cfg, df, feats, logger, debug_overfit=False)
+
     if model:
         outdir = save_artifacts(model, scaler, phase1_cfg, metrics, logger)
         logger.info(f"--- Phase 1 complete. Artifacts: {outdir} ---")
     else:
-        logger.error("Phase 1 training failed.")
+        logger.error("Phase 1 training failed or was in debug mode.")
 
 
 def main():
