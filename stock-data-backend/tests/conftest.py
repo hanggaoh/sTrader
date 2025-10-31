@@ -35,12 +35,19 @@ def db_connection():
 def db_storage(db_connection: Storage):
     """
     Function-scoped fixture that provides a clean database for each test.
-    It truncates all tables in the test database before each test run.
+    It drops and recreates all tables to ensure a fresh schema for each test run.
     """
     with db_connection.pool.connection() as conn:
         with conn.cursor() as cursor:
-            cursor.execute("TRUNCATE TABLE stock_data, news_sentiment, stock_features RESTART IDENTITY;")
-    
+            # Drop tables to ensure schema is recreated.
+            # Hypertables need to be dropped individually.
+            cursor.execute("DROP TABLE IF EXISTS stock_features CASCADE;")
+            cursor.execute("DROP TABLE IF EXISTS news_sentiment CASCADE;")
+            cursor.execute("DROP TABLE IF EXISTS stock_data CASCADE;")
+
+    # Re-run setup_database to create tables with the latest schema
+    db_connection.setup_database()
+
     yield db_connection
 
 @pytest.fixture

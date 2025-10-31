@@ -1,3 +1,15 @@
 stock-data-backend/.env
 /stock-data-backend/src/yfinance.cache
 *cache*
+stock-data-backend/src/ml/features.py
+stock-data-backend/src/ml/preprocessor.py
+stock-data-backend/src/ml/test_features.py
+stock-data-backend/src/ml/utils.py
+stock-data-backend/src/ml/models/finetuned-finbert-chinese-v1/config.json
+stock-data-backend/src/ml/models/finetuned-finbert-chinese-v1/model.safetensors
+stock-data-backend/src/ml/models/finetuned-finbert-chinese-v1/special_tokens_map.json
+stock-data-backend/src/ml/models/finetuned-finbert-chinese-v1/tokenizer_config.json
+stock-data-backend/src/ml/models/finetuned-finbert-chinese-v1/tokenizer.json
+stock-data-backend/src/ml/models/finetuned-finbert-chinese-v1/vocab.txt
+backups/backup-20251028_235118.dump
+backups/backup-20251031_025214.dump

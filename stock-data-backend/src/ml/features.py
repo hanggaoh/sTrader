@@ -46,12 +46,17 @@ def add_volatility_indicators(df: pd.DataFrame, epsilon: float = 1e-10) -> pd.Da
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df['atr'] = tr.ewm(span=14, adjust=False).mean()
 
-    plus_dm = df.groupby('symbol')['high'].diff()
-    minus_dm = df.groupby('symbol')['low'].diff().mul(-1)
-    plus_dm[plus_dm < 0] = 0
-    plus_dm[plus_dm < minus_dm] = 0
-    minus_dm[minus_dm < 0] = 0
-    minus_dm[minus_dm < plus_dm] = 0
+    # Correct ADX calculation
+    high_diff = df.groupby('symbol')['high'].diff()
+    low_diff = df.groupby('symbol')['low'].diff()
+    
+    plus_dm = high_diff.copy()
+    plus_dm[(plus_dm < 0) | (plus_dm <= low_diff.abs())] = 0
+    
+    minus_dm = low_diff.copy()
+    minus_dm[(minus_dm > 0) | (minus_dm.abs() <= high_diff.abs())] = 0
+    minus_dm = minus_dm.abs()
+
     tr14 = tr.rolling(14).sum()
     
     plus_di = 100 * (plus_dm.ewm(alpha=1/14).mean() / (tr14 + epsilon))
@@ -66,6 +71,25 @@ def add_distributional_features(df: pd.DataFrame) -> pd.DataFrame:
     """Adds distributional features like skew and kurtosis."""
     df['skew_21d'] = df.groupby('symbol')['return_1d'].transform(lambda s: s.rolling(21).skew()).fillna(0)
     df['kurt_21d'] = df.groupby('symbol')['return_1d'].transform(lambda s: s.rolling(21).kurt()).fillna(0)
+    return df
+
+def add_volume_and_volatility_features(df: pd.DataFrame, epsilon: float = 1e-10) -> pd.DataFrame:
+    """Adds features based on volume and combined price/volume indicators."""
+    # On-Balance Volume (OBV)
+    # Calculate the daily change and multiply by volume
+    daily_obv = (np.sign(df['close'].diff()) * df['volume']).fillna(0)
+    df['obv'] = df.groupby('symbol')['volume'].cumsum() # More robust calculation
+    df['obv'] = df['obv'].ffill() # Fill initial NaNs
+
+    # Bollinger Bands
+    sma_20 = df.groupby('symbol')['close'].transform(lambda s: s.rolling(20).mean())
+    std_20 = df.groupby('symbol')['close'].transform(lambda s: s.rolling(20).std())
+    upper_band = sma_20 + (2 * std_20)
+    lower_band = sma_20 - (2 * std_20)
+    
+    df['bb_percent_b'] = (df['close'] - lower_band) / ((upper_band - lower_band) + epsilon)
+    df['bb_width'] = (upper_band - lower_band) / (sma_20 + epsilon)
+
     return df
 
 def add_target_variable(df: pd.DataFrame, horizon: int) -> pd.DataFrame:

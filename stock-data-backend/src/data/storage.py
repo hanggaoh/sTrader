@@ -58,13 +58,21 @@ class Storage:
             time TIMESTAMPTZ NOT NULL,
             stock_symbol VARCHAR(20) NOT NULL,
             sentiment DOUBLE PRECISION,
+            sentiment_3d_avg DOUBLE PRECISION,
+            sentiment_7d_avg DOUBLE PRECISION,
+            sentiment_momentum DOUBLE PRECISION,
             sma_5 DOUBLE PRECISION, sma_10 DOUBLE PRECISION, sma_20 DOUBLE PRECISION, sma_50 DOUBLE PRECISION,
-            ema_20 DOUBLE PRECISION, macd DOUBLE PRECISION, macd_signal DOUBLE PRECISION, macd_hist DOUBLE PRECISION,
-            adx DOUBLE PRECISION, rsi DOUBLE PRECISION,
+            ema_20 DOUBLE PRECISION,
+            macd DOUBLE PRECISION, macd_signal DOUBLE PRECISION, macd_hist DOUBLE PRECISION,
+            adx DOUBLE PRECISION,
+            rsi DOUBLE PRECISION,
             return_1d DOUBLE PRECISION, return_5d DOUBLE PRECISION, return_21d DOUBLE PRECISION,
-            volatility_21d DOUBLE PRECISION, atr DOUBLE PRECISION,
+            volatility_21d DOUBLE PRECISION,
+            atr DOUBLE PRECISION,
             skew_21d DOUBLE PRECISION, kurt_21d DOUBLE PRECISION,
-            target INTEGER,
+            obv BIGINT,
+            bb_percent_b DOUBLE PRECISION,
+            bb_width DOUBLE PRECISION,
             PRIMARY KEY (time, stock_symbol)
         );
         """
@@ -208,11 +216,13 @@ class Storage:
             return
 
         cols = [
-            'time', 'stock_symbol', 'sentiment', 'sma_5', 'sma_10', 'sma_20', 'sma_50', 'ema_20', 
-            'macd', 'macd_signal', 'macd_hist', 'adx', 'rsi', 'return_1d', 'return_5d', 'return_21d', 
-            'volatility_21d', 'atr', 'skew_21d', 'kurt_21d', 'target'
+            'time', 'stock_symbol', 'sentiment', 'sentiment_3d_avg', 'sentiment_7d_avg', 'sentiment_momentum',
+            'sma_5', 'sma_10', 'sma_20', 'sma_50', 'ema_20',
+            'macd', 'macd_signal', 'macd_hist', 'adx', 'rsi', 'return_1d', 'return_5d', 'return_21d',
+            'volatility_21d', 'atr', 'skew_21d', 'kurt_21d', 'obv', 'bb_percent_b', 'bb_width'
         ]
-        df_to_copy = features_df.rename(columns={"timestamp": "time", "symbol": "stock_symbol"})
+        df_to_copy = features_df.rename(columns={"timestamp": "time", "symbol": "stock_symbol"}).copy()
+        cols = [c for c in cols if c in df_to_copy.columns]  # Use only available columns
         df_to_copy = df_to_copy[cols]
 
         buffer = io.StringIO()
@@ -224,17 +234,13 @@ class Storage:
                 cursor.execute("CREATE TEMP TABLE temp_features (LIKE stock_features) ON COMMIT DROP;")
                 with cursor.copy(f"COPY temp_features ({','.join(cols)}) FROM STDIN WITH (FORMAT CSV)") as copy:
                     copy.write(buffer.read())
-                
-                cursor.execute("""
+
+                update_cols = [col for col in cols if col not in ('time', 'stock_symbol')]
+                set_clause = ", ".join([f"{col} = EXCLUDED.{col}" for col in update_cols])
+
+                cursor.execute(f"""
                     INSERT INTO stock_features SELECT * FROM temp_features
-                    ON CONFLICT (time, stock_symbol) DO UPDATE SET
-                        sentiment = EXCLUDED.sentiment, sma_5 = EXCLUDED.sma_5, sma_10 = EXCLUDED.sma_10, 
-                        sma_20 = EXCLUDED.sma_20, sma_50 = EXCLUDED.sma_50, ema_20 = EXCLUDED.ema_20, 
-                        macd = EXCLUDED.macd, macd_signal = EXCLUDED.macd_signal, macd_hist = EXCLUDED.macd_hist, 
-                        adx = EXCLUDED.adx, rsi = EXCLUDED.rsi, return_1d = EXCLUDED.return_1d, 
-                        return_5d = EXCLUDED.return_5d, return_21d = EXCLUDED.return_21d, 
-                        volatility_21d = EXCLUDED.volatility_21d, atr = EXCLUDED.atr, 
-                        skew_21d = EXCLUDED.skew_21d, kurt_21d = EXCLUDED.kurt_21d, target = EXCLUDED.target;
+                    ON CONFLICT (time, stock_symbol) DO UPDATE SET {set_clause};
                 """)
 
     def symbol_exists(self, stock_symbol: str) -> bool:

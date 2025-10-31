@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from functools import partial
 import logging
 from typing import List, Tuple
 
@@ -14,10 +15,49 @@ from ml.features import (
     add_momentum_indicators,
     add_volatility_indicators,
     add_distributional_features,
+    add_volume_and_volatility_features,
     add_target_variable,
 )
 
 log = logging.getLogger(__name__)
+
+class FeatureBuilder:
+    """A class to orchestrate the creation of features in a modular way."""
+    def __init__(self, cfg: Config):
+        self.cfg = cfg
+        self.feature_functions = []
+        self.base_feats = [
+            'open', 'high', 'low', 'close', 'volume', 
+            'sentiment', 'sentiment_3d_avg', 'sentiment_7d_avg', 'sentiment_momentum',
+            'sma_5', 'sma_10', 'sma_20', 'sma_50', 'ema_20', 
+            'macd', 'macd_signal', 'macd_hist',
+            'adx',
+            'rsi', 
+            'return_1d', 'return_5d', 'return_21d',
+            'volatility_21d',
+            'atr',
+            'skew_21d',
+            'kurt_21d', 'obv', 'bb_percent_b', 'bb_width'
+        ]
+
+    def register_feature(self, func, **kwargs):
+        """Registers a feature calculation function."""
+        self.feature_functions.append(partial(func, **kwargs))
+
+    def build(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
+        """Builds all registered features on the given DataFrame."""
+        log.info("Building features...")
+        df = df.copy()
+
+        for func in self.feature_functions:
+            df = func(df)
+        
+        feats = self.cfg.features or self.base_feats
+        # Filter for only the features that were actually created
+        final_feats = [f for f in feats if f in df.columns]
+        df = df.dropna(subset=final_feats).copy()
+        log.info(f"Finished building features. Final dataset shape: {df.shape}")
+        return df, final_feats
 
 def _calculate_daily_sentiment(storage: Storage, start_date: str, end_date: str) -> pd.DataFrame:
     """
@@ -49,43 +89,18 @@ def _calculate_daily_sentiment(storage: Storage, start_date: str, end_date: str)
     return daily_sentiment
 
 def build_features(df: pd.DataFrame, cfg: Config) -> Tuple[pd.DataFrame, List[str]]:
-    log.info("Building features...")
-    df = df.copy()
-
-    # A small number to prevent division by zero in technical indicator calculations
+    """Initializes and runs the FeatureBuilder with a standard set of features."""
     epsilon = 1e-10
-
-    df = add_sentiment_features(df)
-    df = add_trend_indicators(df)
-    df = add_momentum_indicators(df, epsilon)
-    df = add_volatility_indicators(df, epsilon)
-    df = add_distributional_features(df)
-    df = add_target_variable(df, cfg.horizon)
     
-    target_dist = df['target'].value_counts(normalize=True)
-    if len(target_dist) < 2: 
-        log.warning("The target variable has only one class! The model will not be able to learn.")
-    else:
-        majority_frac = target_dist.max()
-        log.info(f"Sanity Check: Majority class fraction is {majority_frac:.4f}. A good model must beat this accuracy.")
-        
-    base_feats = [
-        'open', 'high', 'low', 'close', 'volume', 
-        'sentiment', 'sentiment_3d_avg', 'sentiment_7d_avg', 'sentiment_momentum',
-        'sma_5', 'sma_10', 'sma_20', 'sma_50', 'ema_20', 
-        'macd', 'macd_signal', 'macd_hist',
-        'adx',
-        'rsi', 
-        'return_1d', 'return_5d', 'return_21d',
-        'volatility_21d',
-        'atr',
-        'skew_21d',
-        'kurt_21d',
-    ]
-    feats = cfg.features or base_feats
-    df = df.dropna(subset=feats + ["target"]).copy()
-    log.info(f"Finished building features. Final dataset shape: {df.shape}")
-    return df, feats
+    builder = FeatureBuilder(cfg)
+    builder.register_feature(add_sentiment_features)
+    builder.register_feature(add_trend_indicators)
+    builder.register_feature(add_momentum_indicators, epsilon=epsilon)
+    builder.register_feature(add_volatility_indicators, epsilon=epsilon)
+    builder.register_feature(add_distributional_features)
+    builder.register_feature(add_volume_and_volatility_features, epsilon=epsilon)
+    
+    return builder.build(df)
 
 def calculate_and_store_features(storage: Storage, start_date: str, end_date: str, symbol: str = None):
     """
